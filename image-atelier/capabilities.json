@@ -1,0 +1,50 @@
+{
+  "checked": "2026-09-11",
+  "models": {
+    "gpt-image-2.5-sunburst": {
+      "qualities": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "auto"
+      ]
+    },
+    "gpt-image-2.5-flare": {
+      "qualities": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "auto"
+      ]
+    }
+  },
+  "dimensions": {
+    "multiple": 16,
+    "max_edge": 3840,
+    "min_pixels": 655360,
+    "max_pixels": 8294400,
+    "max_ratio": 3
+  },
+  "formats": [
+    "png",
+    "jpeg",
+    "webp"
+  ],
+  "max_images": 8,
+  "max_file_bytes": 20000000,
+  "price_per_million": {
+    "text_input": 5,
+    "image_input": 8,
+    "image_output": 30
+  },
+  "sources": [
+    "https://developers.openai.com/api/docs/guides/image-generation",
+    "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+    "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare"
+  ],
+  "max_outputs": 4
+}

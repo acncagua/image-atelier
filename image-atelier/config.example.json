@@ -1,0 +1,8 @@
+{
+  "note": "このファイルをconfig.local.jsonにコピーし、openai_api_keyをローカルで設定してください。保存先・予算は画面の設定から変更します。",
+  "output": "D:\\ImageAtelierOutput",
+  "budget": 0,
+  "reservation": 1,
+  "live": false,
+  "openai_api_key": ""
+}

@@ -1,0 +1,71 @@
+import React,{useState,useEffect,useRef} from 'react';
+import {createRoot} from 'react-dom/client';
+import {api,bootstrap,upload} from './api';
+import Canvas from './Canvas';
+import ImageViewer from './ImageViewer';
+import {DropZone,References} from './Inputs';
+import History from './History';
+import './styles.css';
+
+const defaults={mode:'polish',provider:'mock',model:'gpt-image-2.5-sunburst',quality:'medium',width:1920,height:1088,n:1,format:'png',change:'',keep:'顔立ち、表情、構図、髪型、衣装を維持する。肌の塗りと光は編集対象に合わせる。',composite:false,feather:8};
+function App(){
+ const [viewerAsset,setViewerAsset]=useState(null);
+ const [boot,setBoot]=useState(null),[p,setP]=useState(defaults),[target,setTarget]=useState(null),[refs,setRefs]=useState([]),[result,setResult]=useState(null),[jobs,setJobs]=useState([]),[message,setMessage]=useState(''),[settingsOpen,setSettingsOpen]=useState(false),[settings,setSettings]=useState(null),[presets,setPresets]=useState([]),[presetName,setPresetName]=useState(''),[prompt,setPrompt]=useState(null),[promptOpen,setPromptOpen]=useState(false),[busy,setBusy]=useState(false),[tool,setTool]=useState('pan'),[brush,setBrush]=useState(40),[strokes,setStrokes]=useState([]),[redo,setRedo]=useState([]),[zoom,setZoom]=useState(0),[pan,setPan]=useState([0,0]),[lockRatio,setLockRatio]=useState(false),[adjust,setAdjust]=useState('crop');
+ const gate=useRef(false),requestId=useRef(sessionStorage.getItem('pending-job')),restoredPrompt=useRef(null);
+ const change=(k,v)=>setP(old=>({...old,[k]:v}));
+ const act=async fn=>{try{return await fn();}catch(e){setMessage(e.message);}};
+ const refresh=()=>api('jobs').then(setJobs);
+ useEffect(()=>{Promise.all([bootstrap(),api('jobs'),api('presets')]).then(([b,j,pr])=>{setBoot(b);setSettings(b.settings);setJobs(j);setPresets(pr);}).catch(e=>setMessage(e.message));let mounted=true;const timer=setInterval(()=>{api('jobs').then(j=>{if(mounted)setJobs(j);}).catch(()=>{});},1500);return()=>{mounted=false;clearInterval(timer);};},[]);
+ useEffect(()=>{setPrompt(restoredPrompt.current);restoredPrompt.current=null;},[p,refs,target]);
+ useEffect(()=>{const last=jobs.find(j=>j.id===requestId.current);if(last?.outputs?.length)setResult(last.outputs.at(-1));if(last&&['completed','failed','unknown','cancelled'].includes(last.status)){requestId.current=null;sessionStorage.removeItem('pending-job');}},[jobs]);
+ function setBase(a){setTarget(a);setStrokes([]);setRedo([]);setZoom(0);setPan([0,0]);}
+ function editHistory(job,asset){
+  const next={...defaults};
+  for(const key of Object.keys(defaults))if(key in job.params)next[key]=job.params[key];
+  setP({...next,mode:'polish',width:asset.width,height:asset.height,n:1,composite:false});
+  setRefs((job.params.refs||[]).map(ref=>({...ref})));
+  restoredPrompt.current=null;setPrompt(null);setPromptOpen(false);setViewerAsset(null);
+  setBase(asset);setResult(null);setTool('pan');
+  setMessage('履歴の画像を次の編集対象にしました。参照資料と変更・維持指示を引き継ぎました。変更内容を調整してから指示文を確認してください。');
+  window.scrollTo({top:0,behavior:'instant'});
+ }
+ async function files(fs,isRef=false){await act(async()=>{if(!fs.length)return;const assets=[];for(const f of (isRef?fs:fs.slice(0,1)))assets.push(await upload(f));if(isRef)setRefs(old=>[...old,...assets.map(a=>({id:a.id,role:'face',person:''}))]);else setBase(assets[0]);});}
+ const params=()=>({...p,target:target?.id||null,refs,strokes});
+ async function preview(){await act(async()=>{if(prompt===null){const r=await api('prompt',params());setPrompt(r.prompt);}setPromptOpen(true);});}
+ async function execute(){
+  if(gate.current)return;
+  if(prompt===null){await preview();return;}
+  if(p.provider==='openai'&&!window.confirm('実APIで'+p.n+'枚生成します。費用は不明です。設定した予約額を予算から確保します。結果不明の再実行は追加課金の可能性があります。実行しますか？'))return;
+  gate.current=true;setBusy(true);
+  await act(async()=>{const id=requestId.current||crypto.randomUUID();requestId.current=id;sessionStorage.setItem('pending-job',id);const j=await api('jobs',{...params(),id,prompt});requestId.current=j.id;sessionStorage.setItem('pending-job',j.id);setPromptOpen(false);setMessage(j.message);await refresh();});
+  gate.current=false;setBusy(false);
+ }
+ async function restore(j){await act(async()=>{const base=j.params.target?await api('assets/'+j.params.target):null;restoredPrompt.current=j.params.prompt;setP({...defaults,...j.params});setRefs(j.params.refs||[]);setBase(base);setStrokes(j.params.strokes||[]);setResult(j.outputs.at(-1)||null);setMessage('条件を復元しました。再実行する場合は送信指示文を確認してください。同一画像の再現は保証されません。');});}
+ async function crop(rect){await act(async()=>{const a=await api('crop',{id:target.id,...rect});setRefs(r=>[...r,{id:a.id,role:'face',person:''}]);setTool('pan');setMessage('選択範囲を顔資料として追加しました。');});}
+ function dimension(key,value){const next=Number(value);setP(old=>({...old,[key]:next,...(lockRatio?{[key==='width'?'height':'width']:Math.round(next*(key==='width'?old.height/old.width:old.width/old.height)/16)*16}:{})}));}
+ if(!boot)return <main className="loading">{message||'Image Atelier を起動しています…'}</main>;
+ return <><header><h1>Image Atelier</h1><div><span className="connection">{p.provider==='mock'?'モック接続':boot.key_set?'APIキー設定済み・アクセス未検証':'APIキー未設定'}</span><button onClick={()=>setSettingsOpen(!settingsOpen)}>設定</button></div></header>
+ {message?<div className="notice" role="status">{message}<button onClick={()=>setMessage('')}>閉じる</button></div>:null}
+ <div className="app-layout"><aside>
+ <DropZone title="編集対象" asset={target} onFiles={fs=>files(fs)}/>{target?<div className="inline"><button onClick={()=>{setTool('crop');setMessage('元画像上をドラッグして顔資料の範囲を選択してください。');}}>顔を切り出す</button><button onClick={()=>{change('width',target.width);change('height',target.height);}}>元画像の寸法</button></div>:null}
+ <DropZone title="参照資料" multiple onFiles={fs=>files(fs,true)}/><References refs={refs} setRefs={setRefs}/>
+ <label className="field">変更すること<textarea placeholder="変更したい内容を具体的に入力してください" value={p.change} onChange={e=>change('change',e.target.value)}/></label>
+ <label className="field">維持すること<textarea value={p.keep} onChange={e=>change('keep',e.target.value)}/></label>
+ <details><summary>維持指定・キャラクタープリセット</summary><div className="preset-buttons">{['顔立ち','表情','構図','髪型','衣装','塗り'].map(x=><button key={x} onClick={()=>change('keep',p.keep+'\n'+x+'を維持する。')}>{x}</button>)}</div><input aria-label="プリセット名" placeholder="キャラクター名など" value={presetName} onChange={e=>setPresetName(e.target.value)}/><button onClick={()=>act(async()=>setPresets(await api('presets',{name:presetName,keep:p.keep,refs}))) }>資料と維持指示を保存</button>{presets.map(pr=><button key={pr.name} onClick={()=>{change('keep',pr.keep);setRefs(pr.refs);}}>{pr.name}</button>)}</details>
+ <div className="run-actions"><button className="wide" onClick={preview}>指示文を確認・編集</button><button className="primary wide" disabled={busy} onClick={execute}>{busy?'登録中…':p.provider==='mock'?'モックで実行':'実APIで実行（有料）'}</button></div>
+ <small>資料の役割は指示文による指定です。顔の同一性や塗りの一致を保証するものではありません。</small>
+ </aside><main>
+ <div className="toolbar"><select aria-label="モード" value={p.mode} onChange={e=>{change('mode',e.target.value);setTool('pan');}}><option value="polish">ブラッシュアップ</option><option value="generate">新規生成</option><option value="inpaint">部分修正</option></select><select aria-label="モデル" value={p.model} onChange={e=>change('model',e.target.value)}>{Object.keys(boot.capabilities.models).map(m=><option key={m}>{m}</option>)}</select><select aria-label="品質" value={p.quality} onChange={e=>change('quality',e.target.value)}>{boot.capabilities.models[p.model].qualities.map(q=><option key={q}>{q}</option>)}</select><div className="dimensions"><input aria-label="幅" type="number" step="16" value={p.width} onChange={e=>dimension('width',e.target.value)}/><span>×</span><input aria-label="高さ" type="number" step="16" value={p.height} onChange={e=>dimension('height',e.target.value)}/></div><select aria-label="出力形式" value={p.format} onChange={e=>change('format',e.target.value)}>{boot.capabilities.formats.map(f=><option key={f} value={f}>{f.toUpperCase()}</option>)}</select><select aria-label="生成枚数" value={p.n} onChange={e=>change('n',Number(e.target.value))}>{[1,2,3,4].map(n=><option key={n} value={n}>{n}枚</option>)}</select></div>
+ <div className="subtoolbar"><button onClick={()=>setP({...p,width:p.height,height:p.width})}>縦横交換</button><label><input type="checkbox" checked={lockRatio} onChange={e=>setLockRatio(e.target.checked)}/>比率保持（16px単位）</label><select aria-label="寸法プリセット" defaultValue="" onChange={e=>{if(e.target.value){const [width,height]=e.target.value.split('x').map(Number);setP({...p,width,height});e.target.value='';}}}><option value="">寸法プリセット</option><option value="1920x1088">1920×1088（SD）</option><option value="2048x1152">2048×1152（16:9）</option><option value="1024x1024">1024×1024</option></select><span>比較はズーム・移動が連動</span></div>
+ {p.width*p.height>2560*1440?<p className="warning">2560×1440を超える解像度は実験的です。</p>:null}
+ {p.mode==='inpaint'?<div className="mask-toolbar">{[['pan','移動'],['brush','ブラシ'],['erase','消しゴム']].map(([v,l])=><button className={tool===v?'selected':''} key={v} onClick={()=>setTool(v)}>{l}</button>)}<label>ブラシ径 <input aria-label="ブラシ径" type="range" min="2" max="300" value={brush} onChange={e=>setBrush(e.target.value)}/>{brush}px</label><button disabled={!strokes.length} onClick={()=>{setRedo([...redo,strokes.at(-1)]);setStrokes(strokes.slice(0,-1));}}>取り消し</button><button disabled={!redo.length} onClick={()=>{setStrokes([...strokes,redo.at(-1)]);setRedo(redo.slice(0,-1));}}>やり直し</button><button onClick={()=>{setStrokes([]);setRedo([]);}}>全消去</button><label><input type="checkbox" checked={p.composite} onChange={e=>change('composite',e.target.checked)}/>変更範囲だけ合成</label><label>境界ぼかし <input aria-label="境界ぼかし" type="number" min="0" max="100" value={p.feather} onChange={e=>change('feather',Number(e.target.value))}/>px</label><small>塗った場所＝変更範囲。APIのマスクは厳密な画素保護ではありません。局所合成は境界を内側にぼかし、塗っていない画素を保持します。</small></div>:null}
+ <div className="compare"><Canvas label="元画像" asset={target} strokes={p.mode==='inpaint'?strokes:[]} setStrokes={updater=>{setStrokes(updater);setRedo([]);}} tool={tool} brush={brush} zoom={zoom} setZoom={setZoom} pan={pan} setPan={setPan} onCrop={crop}/><Canvas label="結果" asset={result} onOpen={()=>setViewerAsset(result)} zoom={zoom} setZoom={setZoom} pan={pan} setPan={setPan}/></div>
+ {result?<div className="result-actions"><button onClick={()=>setViewerAsset(result)}>大きく表示</button><strong>{result.kind==='composite'?'局所合成':result.name}</strong><button onClick={()=>{setBase(result);change('mode','polish');setMessage('結果を次の編集対象にしました。資料と指示を引き継ぎます。');}}>次の編集対象にする</button><button onClick={()=>act(async()=>{const r=await api('export',{id:result.id});setMessage('保存しました: '+r.path);})}>PNGを保存</button><a href={'/api/assets/'+result.id+'/download'} download>PNGダウンロード</a><details><summary>寸法を明示的に調整</summary><p>上部の幅・高さに合わせて別画像を作成します。</p><select aria-label="寸法調整方法" value={adjust} onChange={e=>setAdjust(e.target.value)}><option value="crop">中央を切り抜き</option><option value="pad">透明余白を追加</option><option value="resize">リサイズ（変形を含む）</option></select><button onClick={()=>act(async()=>setResult(await api('resize',{id:result.id,width:p.width,height:p.height,method:adjust})))}>別画像として作成</button></details></div>:null}
+ <History jobs={jobs} onLoad={restore} onEdit={editHistory} onResult={asset=>{setResult(asset);setViewerAsset(asset);}} onCancel={id=>act(async()=>{await api('jobs/'+id+'/cancel',{});await refresh();})}/>
+ </main></div>
+ {viewerAsset?<ImageViewer key={viewerAsset.id} asset={viewerAsset} onClose={()=>setViewerAsset(null)}/>:null}
+ {promptOpen?<div className="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="送信指示文" className="modal"><h2>送信指示文</h2><p>画像の順序と役割を確認してください。ここで編集した文章をそのまま送信します。</p><textarea aria-label="送信指示文" value={prompt||''} onChange={e=>setPrompt(e.target.value)}/><p>実行前の費用概算: {p.provider==='mock'?'対象外（外部APIは呼びません）':'不明'} · {p.width}×{p.height} · {p.format.toUpperCase()} · {p.n}枚</p><div className="inline"><button onClick={()=>setPromptOpen(false)}>戻る</button><button className="primary" disabled={busy} onClick={execute}>この指示文で実行</button></div></section></div>:null}
+ {settingsOpen?<div className="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="設定" className="modal"><h2>設定</h2><button onClick={()=>act(async()=>{const r=await api('connection-check',{});window.alert(r.message+'\n'+Object.entries(r.models).map(([model,available])=>model+': '+(available?'一覧にあり':'一覧にありません')).join('\n'));})}>実APIの接続を確認（生成なし）</button><label className="field">接続方式<select value={p.provider} onChange={e=>change('provider',e.target.value)}><option value="mock">モック（外部通信なし）</option><option value="openai">OpenAI API（有料）</option></select></label><p>APIキー: {boot.key_set?'ローカル設定済み。モデルアクセスは未検証。':'未設定。アプリ直下の config.local.json の openai_api_key に保存し、画面を再読み込みしてください。環境変数 OPENAI_API_KEY も使えます。'}</p><label className="field">保存先フォルダー<input value={settings.output} onChange={e=>setSettings({...settings,output:e.target.value})}/></label><label className="field">このアプリの累計予算（USD）<input type="number" min="0" step="0.1" value={settings.budget} onChange={e=>setSettings({...settings,budget:e.target.value})}/></label><label className="field">1枚の予約額（USD・利用者指定）<input type="number" min="0.01" step="0.1" value={settings.reservation} onChange={e=>setSettings({...settings,reservation:e.target.value})}/></label><label><input type="checkbox" checked={settings.live} onChange={e=>setSettings({...settings,live:e.target.checked})}/>実APIの送信を有効にする</label><p>このUIの概算利用額＋未精算の予約額: ${jobs.reduce((s,j)=>s+j.reserved,0).toFixed(2)}。予約額は費用見積もりではありません。成功分は取得済みの概算額で精算します。結果不明・費用不明の予約は保持します。請求総額の上限は保証できません。</p><p>アプリ予算の残り: ${Math.max(0,Number(settings.budget)-jobs.reduce((s,j)=>s+j.reserved,0)).toFixed(5)}</p><p>使用量は各履歴に記録します。価格表確認日: {boot.capabilities.checked}。使用量の内訳が十分な場合だけ概算し、情報不足なら不明と表示します。</p><a href="https://platform.openai.com/usage" target="_blank" rel="noreferrer">公式Usageで利用状況を確認</a><div className="inline"><button onClick={()=>setSettingsOpen(false)}>閉じる</button><button className="primary" onClick={()=>act(async()=>{const s=await api('settings',settings);setSettings(s);setSettingsOpen(false);setMessage('設定を保存しました。');})}>設定を保存</button></div></section></div>:null}
+ </>;
+}
+createRoot(document.getElementById('root')).render(<App/>);
