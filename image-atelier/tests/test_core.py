@@ -54,7 +54,7 @@ class Tests(unittest.TestCase):
         self.assertIn('画像1: 顔立ちのみ',prompt_for({**p,'mode':'generate'}))
     def test_duplicates_and_restart(self):
         p=self.p();j=self.s.submit(p);self.assertEqual(j['id'],self.s.submit(copy.deepcopy(p))['id'])
-        self.assertEqual(j['id'],self.s.submit(self.p())['id'])
+        self.assertNotEqual(j['id'],self.s.submit(self.p())['id'])
         j.update(status='sending',reserved=1);self.s.save_job(j);self.s.recover()
         self.assertEqual(self.s.job(j['id'])['status'],'unknown');self.assertEqual(self.s.job(j['id'])['reserved'],1)
     def test_queued_restart_cancels(self):
@@ -123,7 +123,7 @@ class Tests(unittest.TestCase):
     def test_mock_edit_and_save_failure(self):
         j=self.s.submit(self.p(width=1920,height=1088))
         with patch.object(self.s,'export',side_effect=PermissionError):Worker(self.s).run(j['id'])
-        j=self.s.job(j['id']);self.assertEqual(j['status'],'completed');self.assertIn('要求寸法',j['message']);self.assertIn('回収',j['message'])
+        j=self.s.job(j['id']);self.assertEqual(j['status'],'local_error');self.assertIn('要求寸法',j['message']);self.assertIn('回収',j['message'])
         self.assertEqual(j['outputs'][0]['width'],1024)
     def test_mock_generation(self):
         j=self.s.submit(self.p(mode='generate',target=None));Worker(self.s).run(j['id']);j=self.s.job(j['id'])

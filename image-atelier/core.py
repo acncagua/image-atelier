@@ -1,3 +1,4 @@
+import copy
 import base64
 import hashlib
 import io
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageOps
 import httpx
 from local_config import api_key
+from persistence import atomic_write, migrate, now, safe_id
 from imaging import normalize, png, mask_image, api_mask, composite
 
 ROOT = Path(__file__).resolve().parent
@@ -50,6 +52,38 @@ def prompt_for(p):
     lines.extend(['変更すること:\n'+p.get('change',''), '維持すること:\n'+p.get('keep','')])
     return '\n\n'.join(lines)
 
+class JobConflict(ValueError):
+    pass
+
+class JobNotFound(ValueError):
+    pass
+
+class PreflightError(ValueError):
+    pass
+
+class ResponsePersistenceError(OSError):
+    def __init__(self,content,request_id):
+        super().__init__('受信応答を保存できません。')
+        self.content=content
+        self.request_id=request_id
+
+
+def canonical_input(p):
+    # Only fixed user inputs; no server snapshots, timestamps or execution state.
+    defaults={'provider':'mock','mode':'polish','target':None,'refs':[],'prompt':'','change':'','keep':'',
+              'model':'','quality':'medium','width':1920,'height':1088,'format':'png','n':1,
+              'strokes':[],'composite':False,'feather':0}
+    result={k:copy.deepcopy(p.get(k,v)) for k,v in defaults.items()}
+    result['refs']=[{'id':r['id'],'role':r['role'],'person':r.get('person','')} for r in result['refs']]
+    result['strokes']=[{'width':float(r['width']),'erase':bool(r.get('erase',False)),
+                       'points':[[float(x),float(y)] for x,y in r['points']]} for r in result['strokes']]
+    result['feather']=float(result['feather'])
+    return result
+
+
+def fingerprint(p):
+    return hashlib.sha256(json.dumps(canonical_input(p),sort_keys=True,allow_nan=False).encode()).hexdigest()
+
 class Store:
     def __init__(self, path):
         self.path = Path(path)
@@ -60,6 +94,7 @@ class Store:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript('CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, meta TEXT); CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, fingerprint TEXT, body TEXT); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, body TEXT);')
         self.db.commit()
+        migrate(self)
 
     def settings(self):
         with self.lock:
@@ -71,20 +106,43 @@ class Store:
             self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('config',json.dumps(data)))
             self.db.commit()
 
-    def asset(self, raw, name='image', parent=None, kind='input'):
+    def asset(self, raw, name='image', parent=None, kind='input', identity=None, operation=None):
         if kind == 'input' and len(raw) > CAP['max_file_bytes']:
-            raise ValueError('ファイルは20MB以下にしてください（初期版の制限）。')
-        image = normalize(raw)
-        ident = uuid.uuid4().hex
-        folder = self.path/'assets'/ident
-        folder.mkdir()
-        (folder/'original.bin').write_bytes(raw)
-        (folder/'image.png').write_bytes(png(image))
-        meta = {'id':ident,'name':name[:240], 'width':image.width,'height':image.height,'parent':parent,'kind':kind,'sha256':hashlib.sha256(raw).hexdigest()}
+            raise ValueError('ファイルは20MB以下にしてください。')
+        ident=uuid.uuid5(uuid.NAMESPACE_URL,identity).hex if identity else uuid.uuid4().hex
         with self.lock:
-            self.db.execute('INSERT INTO assets VALUES (?,?)',(ident,json.dumps(meta)))
-            self.db.commit()
-        return meta
+            row=self.db.execute('SELECT meta FROM assets WHERE id=?',(ident,)).fetchone()
+            if row:return json.loads(row[0])
+            image=normalize(raw)
+            folder=self.path/'assets'/ident
+            folder.mkdir(exist_ok=True)
+            atomic_write(folder/'original.bin',raw)
+            atomic_write(folder/'image.png',png(image))
+            meta={'id':ident,'name':name[:240],'width':image.width,'height':image.height,
+                  'parent':parent,'kind':kind,'sha256':hashlib.sha256(raw).hexdigest()}
+            with self.db:
+                self.db.execute('INSERT INTO assets VALUES (?,?)',(ident,json.dumps(meta)))
+                if operation is not None:
+                    edit={**operation,'id':ident,'source_id':parent,'result':meta}
+                    self.db.execute('INSERT INTO local_edits VALUES (?,?)',(ident,json.dumps(edit,ensure_ascii=False)))
+            return meta
+
+    def local_edits(self):
+        with self.lock:
+            return [json.loads(row[0]) for row in self.db.execute('SELECT body FROM local_edits ORDER BY rowid DESC')]
+
+    def response_file(self, ident):
+        safe_id(ident);self.job(ident)
+        for prefix in ('response_','http_response_'):
+            file=self.path/(prefix+ident+'.json')
+            if file.is_file():return file
+        return None
+
+    def write_response(self,ident,content,request_id=None,http=False):
+        safe_id(ident);self.job(ident)
+        prefix='http_response_' if http else 'response_'
+        atomic_write(self.path/(prefix+ident+'.json'),content)
+        atomic_write(self.path/('response_meta_'+ident+'.json'),json.dumps({'request_id':request_id,'saved':now()}).encode())
 
     def meta(self, ident):
         with self.lock:
@@ -101,7 +159,7 @@ class Store:
         with self.lock:
             row = self.db.execute('SELECT body FROM jobs WHERE id=?',(ident,)).fetchone()
         if not row:
-            raise ValueError('ジョブが見つかりません。')
+            raise JobNotFound('ジョブが見つかりません。')
         return json.loads(row[0])
 
     def jobs(self):
@@ -119,8 +177,9 @@ class Store:
             self.db.execute('UPDATE jobs SET body=? WHERE id=?',(json.dumps(job,ensure_ascii=False), job['id']))
             self.db.commit()
 
-    def recover(self):
+    def recover(self,cancel_queued=True):
         for job in self.jobs():
+            if job['status']=='queued' and not cancel_queued:continue
             if job['status'] in ('sending','queued'):
                 job['status'] = 'unknown' if job['status']=='sending' else 'cancelled'
                 job['message'] = '再起動を検出。自動再送していません。'
@@ -132,8 +191,14 @@ class Store:
 
     def submit(self, p):
         with self.lock:
+            safe_id(p['id'])
+            p={**canonical_input(p),'id':p['id']}
             existing = self.db.execute('SELECT body FROM jobs WHERE id=?',(p['id'],)).fetchone()
-            if existing: return json.loads(existing[0])
+            if existing:
+                job=json.loads(existing[0])
+                if fingerprint(job['params'])!=fingerprint(p):
+                    raise JobConflict('同じジョブIDで異なる入力は登録できません。新しく実行する場合は新しいIDが必要です。')
+                return job
             validate_size(p['width'],p['height'])
             if p['model'] not in CAP['models'] or p['quality'] not in CAP['models'][p['model']]['qualities']:
                 raise ValueError('未対応モデル・品質です。別モデルへの自動切替はしません。')
@@ -160,10 +225,7 @@ class Store:
             if p['mode']=='inpaint':
                 m=self.meta(p['target']); mask=mask_image((m['width'],m['height']),p.get('strokes',[]))
                 if not mask.getbbox(): raise ValueError('変更したい範囲をマスクで塗ってください。')
-            fingerprint=hashlib.sha256(json.dumps({k:v for k,v in p.items() if k!='id'},sort_keys=True).encode()).hexdigest()
-            for job in self.jobs():
-                if job.get('fingerprint')==fingerprint and job['status'] in ('queued','sending'):
-                    return job
+            digest=fingerprint(p)
             settings=self.settings()
             reserved=0
             if p['provider']=='openai':
@@ -173,38 +235,53 @@ class Store:
                 held=sum(j.get('reserved',0) for j in self.jobs())
                 if reserved<=0 or held+reserved>settings['budget']:
                     raise ValueError('アプリ予算の残りが予約額を下回ります。予算と1回の予約額を確認してください。')
-            job={'id':p['id'],'fingerprint':fingerprint,'params':p,'status':'queued','created':datetime.now(timezone.utc).isoformat(),'reserved':reserved,'estimate':None,'message':'待機中','outputs':[]}
-            self.db.execute('INSERT INTO jobs VALUES (?,?,?)',(job['id'],fingerprint,json.dumps(job,ensure_ascii=False)))
+            job={'id':p['id'],'fingerprint':digest,'params':p,'status':'queued','created':datetime.now(timezone.utc).isoformat(),'reserved':reserved,'estimate':None,'message':'待機中','outputs':[]}
+            self.db.execute('INSERT INTO jobs VALUES (?,?,?)',(job['id'],digest,json.dumps(job,ensure_ascii=False)))
             self.db.commit()
             return job
 
-    def export(self, ident):
+    def export(self, ident, operation=None):
         source=self.file(ident)
         folder=Path(self.settings()['output']).expanduser()
         folder.mkdir(parents=True,exist_ok=True)
-        dest=folder/f"atelier_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:12]}.png"
+        dest=folder/(f"atelier_{operation}.png" if operation else f"atelier_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:12]}.png")
+        if operation and dest.exists():
+            if dest.read_bytes()!=source.read_bytes():raise OSError("Existing export differs")
+            return str(dest)
         with dest.open('xb') as f: f.write(source.read_bytes())
         return str(dest)
 
 def real_request(p, store):
-    data={k:p[k] for k in ('model','quality','prompt')}
-    data.update(size=f"{p['width']}x{p['height']}", n=p.get('n',1), output_format=p.get('format','png'))
-    headers={'Authorization':'Bearer '+api_key()}
-    # No SDK retry loop. POST is attempted once; ambiguous failures stay unknown.
-    with httpx.Client(timeout=httpx.Timeout(300,connect=20), follow_redirects=False, trust_env=False) as client:
-        if p['input_ids']:
-            files=[('image[]',(f'image_{i+1}.png',store.file(ident).read_bytes(),'image/png')) for i,ident in enumerate(p['input_ids'])]
-            if p['mode']=='inpaint':
-                m=store.meta(p['target']); mask=mask_image((m['width'],m['height']),p['strokes'])
-                files.append(('mask',('mask.png',api_mask(mask),'image/png')))
-            response=client.post('https://api.openai.com/v1/images/edits',data=data,files=files,headers=headers)
-        else:
-            response=client.post('https://api.openai.com/v1/images/generations',json=data,headers=headers)
-        response.raise_for_status()
-        # Preserve successful HTTP bytes before decoding so malformed responses are recoverable.
-        (store.path/('http_response_'+p['id']+'.json')).write_bytes(response.content)
-        body=response.json()
-        return [base64.b64decode(x['b64_json'],validate=True) for x in body['data']],body.get('usage'),response.headers.get('x-request-id')
+    attempted=False
+    try:
+        data={k:p[k] for k in ('model','quality','prompt')}
+        data.update(size=f"{p['width']}x{p['height']}", n=p.get('n',1), output_format=p.get('format','png'))
+        headers={'Authorization':'Bearer '+api_key()}
+        # No SDK retry loop. POST is attempted once; ambiguous failures stay unknown.
+        with httpx.Client(timeout=httpx.Timeout(300,connect=20), follow_redirects=False, trust_env=False) as client:
+            if p['input_ids']:
+                files=[('image[]',(f'image_{i+1}.png',store.file(ident).read_bytes(),'image/png')) for i,ident in enumerate(p['input_ids'])]
+                if p['mode']=='inpaint':
+                    m=store.meta(p['target']); mask=mask_image((m['width'],m['height']),p['strokes'])
+                    files.append(('mask',('mask.png',api_mask(mask),'image/png')))
+                attempted=True
+                response=client.post('https://api.openai.com/v1/images/edits',data=data,files=files,headers=headers)
+            else:
+                attempted=True
+                response=client.post('https://api.openai.com/v1/images/generations',json=data,headers=headers)
+            response.raise_for_status()
+            # Preserve successful HTTP bytes before decoding so malformed responses are recoverable.
+            try:store.write_response(p['id'],response.content,response.headers.get('x-request-id'),http=True)
+            except OSError:raise ResponsePersistenceError(response.content,response.headers.get('x-request-id')) from None
+            body=response.json()
+            job=store.job(p['id'])
+            job.update(usage=body.get('usage'),estimate=usage_cost(body.get('usage')),
+                       request_id=response.headers.get('x-request-id'),phase='response_saved',recovery=True)
+            store.save_job(job)
+            return [base64.b64decode(x['b64_json'],validate=True) for x in body['data']],body.get('usage'),response.headers.get('x-request-id')
+    except Exception as error:
+        if not attempted:raise PreflightError('外部送信前の準備に失敗しました。') from None
+        raise
 
 def mock_request(p, store):
     time.sleep(0.4)
@@ -223,75 +300,4 @@ def mock_request(p, store):
     draw.text((32,32),'MOCK - TEST PATTERN / NO AI GENERATION',fill='#204c50',font_size=24)
     return [encode(image)]*p.get('n',1),None,'mock-'+uuid.uuid4().hex
 
-class Worker:
-    def __init__(self, store):
-        self.store=store; self.stop=threading.Event()
-        self.thread=threading.Thread(target=self.loop,daemon=True)
-
-    def loop(self):
-        while not self.stop.wait(0.2):
-            queued=[j for j in self.store.jobs() if j['status']=='queued']
-            if queued: self.run(queued[-1]['id'])
-
-    def run(self, ident):
-        s=self.store
-        with s.lock:
-            job=s.job(ident)
-            if job['status']!='queued': return
-            if job['params']['provider']=='openai' and not s.settings()['live']:
-                job.update(status='cancelled',reserved=0,message='実APIが無効になったため送信前に取り消しました。')
-                s.save_job(job)
-                return
-            job.update(status='sending',started=time.time(),message='送信中・生成中（進捗率は取得できません）')
-            s.save_job(job)
-        p=job['params']
-        try:
-            if p['mode']=='inpaint':
-                meta=s.meta(p['target']); mask=mask_image((meta['width'],meta['height']),p['strokes'])
-                job['mask']=s.asset(api_mask(mask),'APIマスク',p['target'],'mask')
-                s.save_job(job)
-            raw,usage,request_id=(real_request if p['provider']=='openai' else mock_request)(p,s)
-            # Recovery bytes reach disk before image validation/composition/export.
-            recovery=s.path/('response_'+ident+'.json')
-            recovery.write_text(json.dumps({'images':[base64.b64encode(b).decode() for b in raw],'usage':usage,'request_id':request_id}),encoding='utf-8')
-            job.update(usage=usage,request_id=request_id,recovery=True)
-            job['estimate']=usage_cost(usage)
-            job['price_checked']=CAP['checked']
-            if job['estimate'] is not None: job['reserved']=max(job['reserved'],job['estimate'])
-            s.save_job(job)
-            for content in raw:
-                result=s.asset(content,'API生出力' if p['provider']=='openai' else 'モック出力',p.get('target'),'raw')
-                job['outputs'].append(result)
-                s.save_job(job)
-            messages=([('モック新規生成は検査用パターンです。' if p['mode']=='generate' else 'モック編集は元画像のコピーです。')+'画質の評価には使えません。'] if p['provider']=='mock' else [])
-            if len(job['outputs'])!=p.get('n',1): messages.append('要求枚数と取得枚数が異なります。取得できた結果を保存しました。')
-            for result in list(job['outputs']):
-                if (result['width'],result['height'])!=(p['width'],p['height']): messages.append('要求寸法と実寸法が異なります。自動調整していません。')
-                if p['mode']=='inpaint' and p.get('composite'):
-                    try:
-                        original=normalize(s.file(p['target']).read_bytes()); output=normalize(s.file(result['id']).read_bytes())
-                        merged=composite(original,output,mask,float(p.get('feather',0)))
-                        merged_asset=s.asset(png(merged),'局所合成',p['target'],'composite')
-                        merged_asset['raw_output_id']=result['id']
-                        job['outputs'].append(merged_asset)
-                    except ValueError as e: messages.append(str(e))
-            job.update(status='completed',message=' / '.join(messages) or '完了')
-            job['saved_paths']=[]
-            for output in job['outputs']:
-                try:
-                    job['saved_path']=s.export(output['id'])
-                    job['saved_paths'].append(job['saved_path'])
-                except OSError: job['message']+=' / 保存先に書き込めません。結果はアプリ内に保持しています。PNGダウンロードで回収できます。'
-        except httpx.HTTPStatusError as e:
-            status=e.response.status_code
-            job['status']='unknown' if status>=500 or status==408 else 'failed'
-            labels={400:'入力またはポリシー',401:'認証',403:'権限またはポリシー',404:'モデルまたはAPI未対応',429:'利用制限・残高'}
-            job['message']=f"HTTP {status}: {labels.get(status,'APIエラー')}。自動再送なし。"
-            job['request_id']=e.response.headers.get('x-request-id')
-            if job['status']=='failed': job['reserved']=0
-        except Exception as error:
-            job['error_type']=type(error).__name__
-            job.update(status='unknown',message='通信・応答処理・保存中に結果を確定できませんでした。自動再送はしません。再実行は追加課金の可能性があります。')
-        finally:
-            job['elapsed']=round(time.time()-job['started'],2)
-            s.save_job(job)
+from worker import Worker

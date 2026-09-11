@@ -2,7 +2,7 @@ let token='';
 export async function api(path, body){
   const response=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json','X-Atelier-Token':token},body:body===undefined?undefined:JSON.stringify(body)});
   const result=await response.json();
-  if(!response.ok)throw new Error(result.detail||'処理に失敗しました');
+  if(!response.ok){const error=new Error(result.detail||'処理に失敗しました');error.status=response.status;throw error;}
   return result;
 }
 export async function bootstrap(){const data=await api('bootstrap');token=data.token;return data;}

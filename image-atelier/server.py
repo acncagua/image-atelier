@@ -4,6 +4,7 @@ import json
 import math
 import os
 import secrets
+import sqlite3
 import uuid
 import httpx
 from contextlib import asynccontextmanager
@@ -11,15 +12,16 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from core import ROOT, CAP, ROLES, Store, Worker, prompt_for
+from core import ROOT, CAP, ROLES, Store, Worker, prompt_for, JobConflict, JobNotFound
+from persistence import now, safe_id
 from imaging import normalize, png
 from PIL import Image, ImageOps
 from local_config import api_key
 
-def create_app(data_path=None, run_worker=True):
+def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
     store=Store(data_path or ROOT/'data')
     token=secrets.token_urlsafe(32)
-    worker=Worker(store)
+    worker=Worker(store,mock_gate=mock_gate)
     @asynccontextmanager
     async def lifespan(app):
         lock_file=None
@@ -31,23 +33,25 @@ def create_app(data_path=None, run_worker=True):
             except OSError:
                 lock_file.close()
                 raise RuntimeError('Image Atelierは既に起動しています。二重起動を停止しました。')
-        store.recover()
+        try:store.recover()
+        except Exception as error:worker.fault(error)
         if run_worker: worker.thread.start()
         yield
         worker.stop.set()
-        if run_worker: worker.thread.join(timeout=1)
+        if run_worker: worker.thread.join()
         if lock_file: lock_file.close()
     app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
     app.state.store=store
     app.state.token=token
+    app.state.worker=worker
 
     @app.middleware('http')
     async def local_only(request, call_next):
         host=request.headers.get('host','')
-        if host not in ('127.0.0.1:18791','localhost:18791','testserver'):
+        if host not in (f'127.0.0.1:{port}',f'localhost:{port}','testserver'):
             return JSONResponse({'detail':'ループバックの正規URLから開いてください。'},status_code=403)
         origin=request.headers.get('origin')
-        if origin and origin not in ('http://127.0.0.1:18791','http://localhost:18791'):
+        if origin and origin not in (f'http://127.0.0.1:{port}',f'http://localhost:{port}'):
             return JSONResponse({'detail':'別サイトからのアクセスは許可されません。'},status_code=403)
         if request.method!='GET' and not secrets.compare_digest(request.headers.get('x-atelier-token',''),token):
             return JSONResponse({'detail':'ページを再読み込みしてください。'},status_code=403)
@@ -57,6 +61,30 @@ def create_app(data_path=None, run_worker=True):
         response.headers['Cache-Control']='no-store'
         response.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
         return response
+
+    @app.exception_handler(JobConflict)
+    async def conflict(request,e): return JSONResponse({'detail':str(e)},status_code=409)
+
+    @app.exception_handler(JobNotFound)
+    async def missing(request,e): return JSONResponse({'detail':str(e)},status_code=404)
+
+    @app.exception_handler(sqlite3.Error)
+    async def database_error(request,e):
+        worker.fault(e)
+        return JSONResponse({'detail':'履歴DBを読み書きできません。ワーカーを一時停止しました。'},status_code=503)
+
+    @app.get('/api/worker/health')
+    def worker_health(): return worker.health()
+
+    @app.post('/api/worker/resume')
+    def worker_resume(): return worker.resume()
+
+    if mock_gate is not None:
+        @app.post('/api/__test/mock-gate')
+        async def test_gate(request:Request):
+            p=await request.json()
+            mock_gate.set() if p['open'] else mock_gate.clear()
+            return {'open':mock_gate.is_set()}
 
     @app.exception_handler(ValueError)
     async def invalid(request,e): return JSONResponse({'detail':str(e)},status_code=400)
@@ -74,7 +102,9 @@ def create_app(data_path=None, run_worker=True):
 
     @app.get('/api/bootstrap')
     def bootstrap():
-        return {'token':token,'capabilities':CAP,'settings':store.settings(),'key_set':bool(api_key()),'roles':ROLES}
+        try:key_set=bool(api_key()) if mock_gate is None else False;config_error=None
+        except ValueError:key_set=False;config_error='APIキー設定ファイルを読み込めません。ローカル設定を確認してください。'
+        return {'token':token,'capabilities':CAP,'settings':store.settings(),'key_set':key_set,'config_error':config_error,'roles':ROLES,'test_mode':mock_gate is not None}
 
     @app.get('/evaluation')
     def evaluation():
@@ -91,6 +121,7 @@ def create_app(data_path=None, run_worker=True):
 
     @app.post('/api/connection-check')
     def connection_check():
+        if mock_gate is not None:raise ValueError('隔離試験環境では外部通信を行いません。')
         key=api_key()
         if not key: raise ValueError('APIキーが未設定です。config.local.jsonを確認してください。')
         try:
@@ -137,7 +168,18 @@ def create_app(data_path=None, run_worker=True):
             if w<image.width or h<image.height: raise ValueError('余白追加では元画像より大きい寸法を指定してください。')
             result=Image.new('RGBA',(w,h),(0,0,0,0)); result.paste(image,((w-image.width)//2,(h-image.height)//2))
         else: raise ValueError('調整方法が不正です。')
-        return store.asset(png(result),'明示的な寸法調整',p['id'],'adjusted')
+        context=p.get('context')
+        if context is not None:
+            from core import canonical_input
+            context=canonical_input(context)
+        details={'source_size':[image.width,image.height]}
+        if p['method']=='crop':details.update(x=x,y=y)
+        if p['method']=='pad':details.update(x=(w-image.width)//2,y=(h-image.height)//2,color=[0,0,0,0])
+        return store.asset(png(result),'明示的な寸法調整',p['id'],'adjusted',operation={
+            'method':p['method'],'requested':[w,h],'details':details,'created':now(),'legacy':False,'context':context})
+
+    @app.get('/api/local-edits')
+    def local_edits():return store.local_edits()
 
     @app.post('/api/prompt')
     async def prompt(request:Request): return {'prompt':prompt_for(await body(request))}
@@ -147,16 +189,32 @@ def create_app(data_path=None, run_worker=True):
         p=await body(request)
         try: uuid.UUID(p['id'])
         except Exception: raise ValueError('ジョブIDが不正です。')
+        if worker.health()['state']=='fault':raise HTTPException(503,'ワーカー障害中です。復旧後に登録を確認してください。')
+        if mock_gate is not None and p.get('provider')!='mock':raise HTTPException(403,'テスト環境はモックのみです。')
         return store.submit(p)
 
+    def expose_job(job):
+        return {**job,'recovery':store.response_file(job['id']) is not None}
+
     @app.get('/api/jobs')
-    def jobs(): return store.jobs()
+    def jobs(): return [expose_job(job) for job in store.jobs()]
+
+    @app.get('/api/jobs/{ident}')
+    def job(ident:str):
+        safe_id(ident)
+        return expose_job(store.job(ident))
 
     @app.get('/api/jobs/{ident}/recovery')
     def recovery(ident:str):
-        job=store.job(ident)
-        if not job.get('recovery'): raise ValueError('回収用の応答記録がありません。')
-        return FileResponse(store.path/('response_'+ident+'.json'),media_type='application/json',filename='response_'+ident+'.json')
+        file=store.response_file(ident)
+        if file is None:raise ValueError('回収用の応答記録がありません。')
+        return FileResponse(file,media_type='application/octet-stream',filename='response_'+ident+'.json')
+
+    @app.post('/api/jobs/{ident}/reprocess')
+    def reprocess(ident:str):
+        safe_id(ident)
+        if worker.current is not None:raise HTTPException(409,'実行中の処理が完了してから再処理してください。')
+        return worker.reprocess(ident)
 
     @app.post('/api/jobs/{ident}/cancel')
     def cancel(ident:str):
@@ -200,8 +258,6 @@ def create_app(data_path=None, run_worker=True):
     if (ROOT/'dist').exists(): app.mount('/',StaticFiles(directory=ROOT/'dist',html=True),name='ui')
     return app
 
-app=create_app()
-
 if __name__=='__main__':
     import uvicorn
-    uvicorn.run(app,host='127.0.0.1',port=18791,access_log=False)
+    uvicorn.run(create_app(),host='127.0.0.1',port=18791,access_log=False)
