@@ -8,7 +8,7 @@ from upscale_geometry import finish,plan
 
 request=json.loads(Path(sys.argv[1]).read_text('utf-8'))
 status=Path(request['status']);cancel=Path(request['cancel']);mode=Path(request['model']).read_text('utf-8')
-def report(**value):atomic_write(status,json.dumps(value).encode())
+def report(**value):atomic_write(status,json.dumps({'pid':os.getpid(),**value}).encode())
 if mode=='crash':os._exit(17)
 if mode in ('oom','no-cuda','bad-model'):
     report(state='failed',error_type=mode,message='模擬エラー: '+mode);sys.exit(1)
@@ -23,5 +23,8 @@ with Image.open(request['input']) as im:
     p=plan(im.width,im.height,request['options']);native=im.resize((im.width*4,im.height*4))
     result,geometry=finish(native,(p['width'],p['height']),p['fit'])
 import io
-buffer=io.BytesIO();result.save(buffer,format='PNG');publish_new(Path(request['output']),buffer.getvalue())
+buffer=io.BytesIO();result.save(buffer,format='PNG')
+report(state='saving',environment=environment,geometry=geometry,actual_size=list(result.size))
+publish_new(Path(request['output']),buffer.getvalue())
+if mode=='crash-after-png':os._exit(19)
 report(state='completed',environment=environment,geometry=geometry,actual_size=list(result.size))

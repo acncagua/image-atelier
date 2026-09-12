@@ -53,7 +53,7 @@ class Jobs(unittest.TestCase):
         with self.assertRaises(JobConflict):self.manager.submit({**body,'options':{'factor':3}})
     def test_queued_cancel_never_launches(self):
         job=self.manager.submit(self.body());self.manager.cancel(job['id'])
-        with patch('upscale_jobs.subprocess.Popen') as launch:self.manager.run(job['id']);launch.assert_not_called()
+        with patch('upscale_jobs.launch') as launch:self.manager.run(job['id']);launch.assert_not_called()
     def test_running_cancel_waits_for_process_exit(self):
         self.model.write_text('wait');job=self.manager.submit(self.body())
         thread=threading.Thread(target=self.manager.run,args=(job['id'],));thread.start()
@@ -69,7 +69,7 @@ class Jobs(unittest.TestCase):
         job=self.manager.submit(self.body())
         with patch.object(self.s,'export',side_effect=PermissionError):self.manager.run(job['id'])
         before=self.manager.get(job['id']);self.assertEqual(before['status'],'export_failed')
-        with patch('upscale_jobs.subprocess.Popen',side_effect=AssertionError('no inference')):
+        with patch('upscale_jobs.launch',side_effect=AssertionError('no inference')):
             after=self.manager.retry_save(job['id']);again=self.manager.retry_save(job['id'])
         self.assertEqual(after['status'],'completed');self.assertEqual(before['output'],after['output']);self.assertEqual(after['saved_path'],again['saved_path'])
     def test_restart_does_not_requeue(self):

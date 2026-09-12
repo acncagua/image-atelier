@@ -100,7 +100,7 @@ def execute(request,report):
     if np.any(alpha<255):
         native=native.convert('RGBA');native.putalpha(Image.fromarray(alpha,'L').resize(native.size,Image.Resampling.LANCZOS))
     result,geometry=finish(native,(params['width'],params['height']),params['fit'])
-    check();report(state='saving',environment=info)
+    check();report(state='saving',environment=info,geometry=geometry,actual_size=[params['width'],params['height']])
     import io
     buffer=io.BytesIO();kwargs={'icc_profile':icc} if icc else {}
     result.save(buffer,format='PNG',**kwargs)
