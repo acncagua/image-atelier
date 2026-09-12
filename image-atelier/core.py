@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageOps
 import httpx
 from local_config import api_key
-from persistence import atomic_write, migrate, now, safe_id
+from persistence import atomic_write, publish_new, migrate, now, safe_id
 from imaging import normalize, png, mask_image, api_mask, composite
 
 ROOT = Path(__file__).resolve().parent
@@ -56,6 +56,9 @@ class JobConflict(ValueError):
     pass
 
 class JobNotFound(ValueError):
+    pass
+
+class AssetNotFound(ValueError):
     pass
 
 class PreflightError(ValueError):
@@ -148,7 +151,7 @@ class Store:
         with self.lock:
             row = self.db.execute('SELECT meta FROM assets WHERE id=?',(ident,)).fetchone()
         if not row:
-            raise ValueError('画像が見つかりません。')
+            raise AssetNotFound('画像が見つかりません。')
         return json.loads(row[0])
 
     def file(self, ident):
@@ -176,6 +179,15 @@ class Store:
                 job['budget_status']='settled_estimate'
             self.db.execute('UPDATE jobs SET body=? WHERE id=?',(json.dumps(job,ensure_ascii=False), job['id']))
             self.db.commit()
+
+    def update_queued(self,ident,changes):
+        """Linearization point shared by cancellation and dispatch admission."""
+        with self.lock:
+            job=self.job(ident)
+            if job['status']!='queued':return None
+            job.update(changes)
+            self.save_job(job)
+            return job
 
     def recover(self,cancel_queued=True):
         for job in self.jobs():
@@ -242,14 +254,26 @@ class Store:
 
     def export(self, ident, operation=None):
         source=self.file(ident)
+        content=source.read_bytes()
         folder=Path(self.settings()['output']).expanduser()
         folder.mkdir(parents=True,exist_ok=True)
         dest=folder/(f"atelier_{operation}.png" if operation else f"atelier_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:12]}.png")
-        if operation and dest.exists():
-            if dest.read_bytes()!=source.read_bytes():raise OSError("Existing export differs")
-            return str(dest)
-        with dest.open('xb') as f: f.write(source.read_bytes())
-        return str(dest)
+        digest=hashlib.sha256(content).hexdigest()[:16]
+        candidate=dest
+        for attempt in range(100):
+            if candidate.exists():
+                if candidate.read_bytes()==content:return str(candidate)
+                # Preserve both valid user files and legacy partial exports. Recover
+                # into a stable sibling so subsequent reprocessing is idempotent.
+                suffix='' if attempt==0 else f'_{attempt}'
+                candidate=dest.with_name(f'{dest.stem}_recovered_{digest}{suffix}.png')
+                continue
+            try:
+                publish_new(candidate,content)
+                return str(candidate)
+            except FileExistsError:
+                continue  # A concurrent publisher won; compare its complete file.
+        raise OSError('書き出し先で名前の競合が続いています。保存先を確認してください。')
 
 def real_request(p, store):
     attempted=False

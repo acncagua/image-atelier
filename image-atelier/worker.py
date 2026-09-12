@@ -3,6 +3,7 @@ import base64
 import json
 import threading
 import time
+from pathlib import Path
 import httpx
 import core
 from persistence import atomic_write
@@ -73,8 +74,8 @@ class Worker:
                 try:
                     if p['provider']=='openai':
                         if not self.store.settings()['live']:
-                            job.update(status='cancelled',reserved=0,message='実APIを無効化したため待機取消。')
-                            self.persist(job);return
+                            job=self.store.update_queued(ident,{'status':'cancelled','reserved':0,'message':'実APIを無効化したため待機取消。'})
+                            return
                         if not core.api_key():raise ValueError('APIキー未設定')
                     for asset_id in p['input_ids']:self.store.file(asset_id).read_bytes()
                     if p['mode']=='inpaint':
@@ -82,10 +83,14 @@ class Worker:
                         mask=mask_image((meta['width'],meta['height']),p['strokes'])
                         job['mask']=self.store.asset(api_mask(mask),'APIマスク',p['target'],'mask',identity=f'{ident}:mask')
                 except (ValueError,FileNotFoundError) as error:
-                    job.update(status='failed',phase='preflight_failed',reserved=0,error_type=type(error).__name__,message='送信前の入力・設定確認に失敗しました。外部API未送信。資料と設定を確認してください。')
-                    self.persist(job);return
-                job.update(status='sending',phase='dispatching',started=started,message='送信中・生成中')
-                if not self.persist(job):return
+                    job=self.store.update_queued(ident,{'status':'failed','phase':'preflight_failed','reserved':0,'error_type':type(error).__name__,'message':'送信前の入力・設定確認に失敗しました。外部API未送信。資料と設定を確認してください。'})
+                    return
+                # Preflight may have yielded to a successful cancellation. Never write
+                # the stale queued snapshot back. Only the winning transition dispatches.
+                changes={'status':'sending','phase':'dispatching','started':started,'message':'送信中・生成中'}
+                if 'mask' in job:changes['mask']=job['mask']
+                job=self.store.update_queued(ident,changes)
+                if job is None:return
                 attempted=True
                 if p['provider']=='mock' and self.mock_gate:
                     while not self.mock_gate.wait(.1):
@@ -111,6 +116,7 @@ class Worker:
                 if job:
                     try:job=self.store.job(ident)
                     except Exception:pass  # The in-memory state is still exposed through health.
+                    if not attempted and job['status']=='cancelled':return
                     try:saved=self.store.response_file(ident) is not None
                     except Exception:saved=False
                     job.update(status='local_error' if saved else ('unknown' if attempted else 'failed'),
@@ -191,7 +197,12 @@ class Worker:
         exported=job.setdefault('exported',{})
         for output in outputs:
             try:
-                if output['id'] not in exported:
+                destination=exported.get(output['id'])
+                complete=False
+                if destination:
+                    try:complete=Path(destination).read_bytes()==s.file(output['id']).read_bytes()
+                    except FileNotFoundError:pass
+                if not complete:
                     exported[output['id']]=s.export(output['id'],operation=f'{ident}-{output["id"]}')
             except OSError:errors.append('保存先に書き込めません。PNGダウンロードで回収し、再処理で書き出しを再試行できます。')
         job.update(saved_paths=list(exported.values()),status='local_error' if errors else 'completed',

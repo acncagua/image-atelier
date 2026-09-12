@@ -63,11 +63,44 @@ test('invalid shapes cannot destroy recoverable manual text',()=>{
 });
 test('missing assets warn without changing text or source IDs',async()=>{
  const saved={targetId:'missing',refs:[{id:'missing-reference'}],prompt:'protected text'};
- const result=await resolveDraftAssets(saved,async()=>{throw new Error('404');});
+ const result=await resolveDraftAssets(saved,async()=>{const e=new Error('missing');e.status=404;throw e;});
  assert.equal(result.base,null);assert.equal(result.warnings.length,2);assert.equal(saved.prompt,'protected text');assert.equal(saved.targetId,'missing');
 });
 test('acknowledgement persistence failure keeps registration unconfirmed',async()=>{
  let writes=0;const manager=new Registration('ack-failure',async(_,body)=>({id:body.id}),async()=>{if(++writes===2)throw new Error('storage full');});
  await assert.rejects(manager.begin({prompt:'A'}));assert.equal(manager.record.state,'unconfirmed');
  await assert.rejects(manager.begin({prompt:'B'}));
+});
+test('persistent registration write failure blocks POST even after 404 reconciliation',async()=>{
+ let posts=0;
+ const manager=new Registration('write-failed',async(path,body)=>{if(body){posts++;return {id:body.id};}const e=new Error('missing');e.status=404;throw e;},async()=>{throw new Error('full');});
+ await assert.rejects(manager.begin({prompt:'fixed'}));
+ await assert.rejects(manager.reconcile());await assert.rejects(manager.reconcile());
+ assert.equal(posts,0);
+ assert.equal(manager.record.state,'unsaved');
+});
+test('transient draft asset failure must not return null assets',async()=>{
+ const saved={targetId:'existing',resultId:'existing-result',refs:[],prompt:'keep'};
+ await assert.rejects(resolveDraftAssets(saved,async()=>{const e=new Error('temporary');e.status=503;throw e;}));
+ assert.equal(saved.targetId,'existing');assert.equal(saved.resultId,'existing-result');
+});
+test('registration recovery sends once after durable storage recovers',async()=>{
+ let full=true;let posts=0;let sent;
+ const save=async()=>{if(full)throw new Error('full');return true;};
+ const manager=new Registration('restore-storage',async(path,body)=>{if(body){posts++;sent=structuredClone(body);return {id:body.id};}const e=new Error('missing');e.status=404;throw e;},save);
+ await assert.rejects(manager.begin({prompt:'fixed'}));const id=manager.record.payload.id;
+ await assert.rejects(manager.reconcile());assert.equal(posts,0);
+ full=false;await manager.reconcile();assert.equal(posts,1);assert.equal(sent.id,id);assert.equal(sent.prompt,'fixed');
+});
+test('stale persistence refusal is not considered a successful save',async()=>{
+ let posts=0;const manager=new Registration('stale',async()=>posts++,async()=>false);
+ await assert.rejects(manager.begin({prompt:'A'}));assert.equal(posts,0);assert.equal(manager.record.state,'unsaved');
+});
+test('offline draft load preserves IDs until the successful retry',async()=>{
+ const saved={targetId:'target',resultId:'result',refs:[{id:'ref'}],prompt:'manual'};
+ const snapshot=structuredClone(saved);
+ await assert.rejects(resolveDraftAssets(saved,async()=>{throw new TypeError('Failed to fetch');}));
+ assert.deepEqual(saved,snapshot);
+ const restored=await resolveDraftAssets(saved,async id=>({id,width:1024,height:1024}));
+ assert.equal(restored.base.id,'target');assert.equal(restored.out.id,'result');assert.deepEqual(restored.warnings,[]);
 });

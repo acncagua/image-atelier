@@ -28,7 +28,10 @@ export function recoverDraft(saved,defaults){
 
 export async function resolveDraftAssets(saved,load){
  const warnings=[];
- const get=async id=>{if(!id)return null;try{return await load(id);}catch{warnings.push('欠損画像 '+id+' は表示できません。下書きの原データは保護しました。');return null;}};
+ const get=async id=>{if(!id)return null;try{return await load(id);}catch(error){
+  if(error.status===404){warnings.push('欠損画像 '+id+' は表示できません。下書きの原データは保護しました。');return null;}
+  throw new Error('画像の取得を一時的に確認できません。元の画像IDを保持し、下書きの自動保存を停止しています。通信復旧後に「下書き復元を再試行」を押してください。');
+ }};
  const [base,out]=await Promise.all([get(saved.targetId),get(saved.resultId)]);
  for(const ref of saved.refs||[])await get(ref.id);
  return {base,out,warnings};

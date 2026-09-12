@@ -34,6 +34,21 @@ def atomic_write(path,content):
         if temporary.exists():temporary.unlink()
 
 
+def publish_new(path,content):
+    """Publish a complete file without replacing any existing destination."""
+    temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
+    try:
+        with temporary.open('xb') as output:
+            output.write(content);output.flush();os.fsync(output.fileno())
+        if os.name=='nt':
+            # Windows rename is atomic and fails if the destination already exists.
+            os.rename(temporary,path)
+        else:
+            os.link(temporary,path)
+    finally:
+        if temporary.exists():temporary.unlink()
+
+
 def migrate(store):
     with store.lock:
         version=store.db.execute('PRAGMA user_version').fetchone()[0]

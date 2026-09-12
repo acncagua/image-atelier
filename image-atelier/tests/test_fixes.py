@@ -221,5 +221,75 @@ class Fixes(unittest.TestCase):
         self.assertEqual(worker.resume()['state'],'running')
         self.assertEqual(self.s.job(unknown['id'])['status'],'unknown')
         self.assertEqual(self.s.job(queued['id'])['status'],'queued')
+    def test_cancel_during_preflight_never_dispatches(self):
+        with patch('core.api_key',return_value='test'):
+            job=self.s.submit(self.params(provider='openai'))
+        entered=threading.Event();release=threading.Event();original=self.s.file
+        def paused_file(ident):
+            entered.set();release.wait(3);return original(ident)
+        worker=Worker(self.s)
+        with patch('core.api_key',return_value='test'),patch.object(self.s,'file',side_effect=paused_file),patch('core.real_request') as provider:
+            thread=threading.Thread(target=worker.run,args=(job['id'],));thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                response=self.client.post('/api/jobs/'+job['id']+'/cancel',json={})
+                self.assertEqual(response.status_code,200)
+            finally:release.set();thread.join(5)
+            provider.assert_not_called()
+        self.assertEqual(self.s.job(job['id'])['status'],'cancelled')
+        self.assertEqual(self.s.job(job['id'])['reserved'],0)
+    def test_partial_existing_export_recovers_without_overwriting(self):
+        expected=self.s.file(self.a['id']).read_bytes()
+        folder=Path(self.s.settings()['output']);folder.mkdir()
+        broken=folder/'atelier_partial.png';broken.write_bytes(expected[:70])
+        recovered=Path(self.s.export(self.a['id'],operation='partial'))
+        self.assertEqual(recovered.read_bytes(),expected)
+        if recovered!=broken:self.assertEqual(broken.read_bytes(),expected[:70])
+        self.assertEqual(self.s.export(self.a['id'],operation='partial'),str(recovered))
+    def test_export_failure_never_publishes_partial_final(self):
+        with patch('persistence.os.fsync',side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):self.s.export(self.a['id'],operation='interrupted')
+        folder=Path(self.s.settings()['output'])
+        self.assertFalse((folder/'atelier_interrupted.png').exists())
+        self.assertEqual(list(folder.glob('*.tmp')),[])
+        result=Path(self.s.export(self.a['id'],operation='interrupted'))
+        self.assertEqual(result.read_bytes(),self.s.file(self.a['id']).read_bytes())
+    def test_conflicting_valid_export_is_never_overwritten(self):
+        folder=Path(self.s.settings()['output']);folder.mkdir()
+        original=png(Image.new('RGB',(32,32),'red'))
+        existing=folder/'atelier_collision.png';existing.write_bytes(original)
+        result=Path(self.s.export(self.a['id'],operation='collision'))
+        self.assertNotEqual(existing,result);self.assertEqual(existing.read_bytes(),original)
+        self.assertEqual(result.read_bytes(),self.s.file(self.a['id']).read_bytes())
+    def test_parallel_export_publish_is_idempotent(self):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            files=list(pool.map(lambda _:self.s.export(self.a['id'],operation='parallel'),range(8)))
+        self.assertEqual(len(set(files)),1)
+        self.assertEqual(len(list(Path(self.s.settings()['output']).glob('*.png'))),1)
+    def test_dispatch_winner_rejects_late_cancellation(self):
+        entered=threading.Event();release=threading.Event();content=self.s.file(self.a['id']).read_bytes()
+        with patch('core.api_key',return_value='test'):job=self.s.submit(self.params(provider='openai'))
+        def provider(*args):entered.set();release.wait(3);return [content],None,None
+        worker=Worker(self.s)
+        with patch('core.api_key',return_value='test'),patch('core.real_request',side_effect=provider) as send:
+            thread=threading.Thread(target=worker.run,args=(job['id'],));thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(self.client.post('/api/jobs/'+job['id']+'/cancel',json={}).status_code,400)
+            finally:release.set();thread.join(5)
+            self.assertEqual(send.call_count,1)
+    def test_missing_asset_is_404_but_db_failure_is_503(self):
+        self.assertEqual(self.client.get('/api/assets/'+uuid.uuid4().hex).status_code,404)
+        with patch.object(self.s,'meta',side_effect=sqlite3.OperationalError('temporary')):
+            self.assertEqual(self.client.get('/api/assets/'+self.a['id']).status_code,503)
+    def test_reprocess_repairs_partial_file_even_with_cached_export_path(self):
+        job=self.s.submit(self.params());job['status']='unknown';self.s.save_job(job);self.response(job)
+        worker=Worker(self.s);first=worker.reprocess(job['id'])
+        old=Path(first['saved_paths'][0]);complete=old.read_bytes();old.write_bytes(complete[:70])
+        with patch('core.real_request',side_effect=AssertionError('no API')):
+            second=worker.reprocess(job['id']);third=worker.reprocess(job['id'])
+        self.assertEqual(second['status'],'completed');self.assertEqual(second['outputs'],first['outputs'])
+        self.assertEqual(Path(second['saved_paths'][0]).read_bytes(),complete)
+        self.assertEqual(old.read_bytes(),complete[:70]);self.assertEqual(third['saved_paths'],second['saved_paths'])
 
 if __name__=='__main__':unittest.main()

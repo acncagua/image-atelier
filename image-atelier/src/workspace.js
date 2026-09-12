@@ -52,24 +52,34 @@ export async function acquireDraft(){
 export class Registration{
  constructor(id,request,save=writeRecord){this.id=id;this.request=request;this.save=save;this.record=null;this.busy=false;}
  async begin(payload){
-  if(this.busy||this.record?.state==='unconfirmed')throw new Error('未確認の登録があります。先に登録状況を確認してください。');
+  if(this.busy||['unconfirmed','unsaved'].includes(this.record?.state))throw new Error('未確認・未保存の登録があります。先に登録状況を確認してください。');
   this.busy=true;
   try{
    const body=structuredClone({...payload,id:crypto.randomUUID()});
-   this.record={id:this.id,revision:Date.now(),state:'unconfirmed',payload:body};
-   // If this write fails, no local registration request is sent.
-   await this.save('registrations',this.record);
+   this.record={id:this.id,revision:Math.max(Date.now(),(this.record?.revision||0)+1),state:'unsaved',attempted:false,payload:body};
    return await this.send();
   }finally{this.busy=false;}
  }
  async send(){
+  // This gate also applies to a POST reached through 404 reconciliation.
+  // Persist the exact ID and payload before any possibly transmitting operation.
+  const previous=this.record;
+  const durable={...previous,state:'unconfirmed',attempted:true,revision:Math.max(Date.now(),(previous.revision||0)+1)};
+  try{
+   if(await this.save('registrations',durable)===false)throw new Error('古い登録情報の保存は拒否されました。');
+  }catch(error){
+   this.record={...previous,state:previous.attempted||previous.state==='unconfirmed'?'unconfirmed':'unsaved'};
+   throw new Error(this.record.state==='unsaved'?'登録情報を保存できないため未送信です。保存できるまで新しいPOSTは行いません。':'登録情報を保存できないため、今回のPOSTは行っていません。以前の受付は未確認です。');
+  }
+  this.record=durable;
   try{
    const job=await this.request('jobs',this.record.payload);
-   const accepted={...this.record,state:'accepted',revision:Date.now(),jobId:job.id};
-   await this.save('registrations',accepted);this.record=accepted;return job;
+   const accepted={...this.record,state:'accepted',revision:Math.max(Date.now(),(this.record.revision||0)+1),jobId:job.id};
+   if(await this.save('registrations',accepted)===false)throw new Error('受付結果を保存できません。');this.record=accepted;return job;
   }catch(error){
    if(error.status>=400&&error.status<500&&error.status!==408&&error.status!==429){
-    this.record={...this.record,state:'rejected',revision:Date.now()};await this.save('registrations',this.record);
+    const rejected={...this.record,state:'rejected',revision:Math.max(Date.now(),(this.record.revision||0)+1)};
+    if(await this.save('registrations',rejected)!==false)this.record=rejected;
    }
    throw error;
   }
@@ -80,8 +90,8 @@ export class Registration{
    let job;
    try{job=await this.request('jobs/'+this.record.payload.id);}
    catch(error){if(error.status===404)return await this.send();throw new Error('登録状況を確認できません。同じIDと入力を保持しています。');}
-   const accepted={...this.record,state:'accepted',revision:Date.now(),jobId:job.id};
-   await this.save('registrations',accepted);this.record=accepted;return job;
+   const accepted={...this.record,state:'accepted',revision:Math.max(Date.now(),(this.record.revision||0)+1),jobId:job.id};
+   if(await this.save('registrations',accepted)===false)throw new Error('受付結果を保存できません。');this.record=accepted;return job;
   }finally{this.busy=false;}
  }
 }

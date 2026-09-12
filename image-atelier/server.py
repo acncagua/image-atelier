@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from core import ROOT, CAP, ROLES, Store, Worker, prompt_for, JobConflict, JobNotFound
+from core import ROOT, CAP, ROLES, Store, Worker, prompt_for, JobConflict, JobNotFound, AssetNotFound
 from persistence import now, safe_id
 from imaging import normalize, png
 from PIL import Image, ImageOps
@@ -44,6 +44,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
     app.state.store=store
     app.state.token=token
     app.state.worker=worker
+    app.state.test_asset_fault=False
 
     @app.middleware('http')
     async def local_only(request, call_next):
@@ -68,6 +69,9 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
     @app.exception_handler(JobNotFound)
     async def missing(request,e): return JSONResponse({'detail':str(e)},status_code=404)
 
+    @app.exception_handler(AssetNotFound)
+    async def missing_asset(request,e): return JSONResponse({'detail':str(e)},status_code=404)
+
     @app.exception_handler(sqlite3.Error)
     async def database_error(request,e):
         worker.fault(e)
@@ -85,6 +89,11 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
             p=await request.json()
             mock_gate.set() if p['open'] else mock_gate.clear()
             return {'open':mock_gate.is_set()}
+
+        @app.post('/api/__test/asset-fault')
+        async def test_asset_fault(request:Request):
+            p=await request.json();app.state.test_asset_fault=p.get('enabled') is True
+            return {'enabled':app.state.test_asset_fault}
 
     @app.exception_handler(ValueError)
     async def invalid(request,e): return JSONResponse({'detail':str(e)},status_code=400)
@@ -135,7 +144,11 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
             raise ValueError('接続または応答の確認に失敗しました。ネットワーク設定を確認してください。キーは表示しません。') from None
 
     @app.get('/api/assets/{ident}')
-    def meta(ident:str): return store.meta(ident)
+    def meta(ident:str):
+        if mock_gate is not None and app.state.test_asset_fault:raise HTTPException(503,'試験用の一時的な画像取得障害です。')
+        result=store.meta(ident)
+        if not store.file(ident).is_file():raise AssetNotFound('画像ファイルが見つかりません。')
+        return result
 
     @app.get('/api/assets/{ident}/image')
     def image(ident:str): return FileResponse(store.file(ident),media_type='image/png')
@@ -218,11 +231,9 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
 
     @app.post('/api/jobs/{ident}/cancel')
     def cancel(ident:str):
-        with store.lock:
-            job=store.job(ident)
-            if job['status']!='queued': raise ValueError('取消できるのは待機中だけです。送信済み処理の課金は取り消せません。')
-            job.update(status='cancelled',reserved=0,message='待機取消')
-            store.save_job(job); return job
+        job=store.update_queued(ident,{'status':'cancelled','reserved':0,'message':'待機取消'})
+        if job is None:raise ValueError('取消できるのは待機中だけです。送信済み処理の課金は取り消せません。')
+        return job
 
     @app.post('/api/export')
     async def export(request:Request): return {'path':store.export((await body(request))['id'])}
