@@ -93,6 +93,7 @@ class Store:
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path/'assets').mkdir(exist_ok=True)
         self.lock = threading.RLock()
+        self.asset_lock = threading.RLock()
         self.db = sqlite3.connect(self.path/'history.sqlite3', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript('CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, meta TEXT); CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, fingerprint TEXT, body TEXT); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, body TEXT);')
@@ -113,8 +114,9 @@ class Store:
         if kind == 'input' and len(raw) > CAP['max_file_bytes']:
             raise ValueError('ファイルは20MB以下にしてください。')
         ident=uuid.uuid5(uuid.NAMESPACE_URL,identity).hex if identity else uuid.uuid4().hex
-        with self.lock:
-            row=self.db.execute('SELECT meta FROM assets WHERE id=?',(ident,)).fetchone()
+        with self.asset_lock:
+            with self.lock:
+                row=self.db.execute('SELECT meta FROM assets WHERE id=?',(ident,)).fetchone()
             if row:return json.loads(row[0])
             image=normalize(raw)
             folder=self.path/'assets'/ident
@@ -123,7 +125,7 @@ class Store:
             atomic_write(folder/'image.png',png(image))
             meta={'id':ident,'name':name[:240],'width':image.width,'height':image.height,
                   'parent':parent,'kind':kind,'sha256':hashlib.sha256(raw).hexdigest()}
-            with self.db:
+            with self.lock, self.db:
                 self.db.execute('INSERT INTO assets VALUES (?,?)',(ident,json.dumps(meta)))
                 if operation is not None:
                     edit={**operation,'id':ident,'source_id':parent,'result':meta}

@@ -1,0 +1,13 @@
+{
+  "native_scale": 4,
+  "max_input_pixels": 2097152,
+  "max_input_edge": 2048,
+  "max_output_pixels": 33554432,
+  "max_output_edge": 8192,
+  "max_tiles": 4096,
+  "tile_min": 32,
+  "tile_max": 512,
+  "tile_multiple": 8,
+  "default_tile": 192,
+  "default_overlap": 8
+}

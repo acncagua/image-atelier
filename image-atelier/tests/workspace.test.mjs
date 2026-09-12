@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {Registration,writeRecord,readRecord,validateDraft,archiveDraft,listRecords} from '../src/workspace.js';
 import {recoverDraft,resolveDraftAssets} from '../src/draftValidation.js';
+import {readFileSync} from 'node:fs';
+import {upscalePlan,upscaleDefaults,restoreUpscaleOptions} from '../src/upscalePlan.js';
 
 test('frozen registration survives editing and lost acknowledgement without extra job',async()=>{
  const accepted=new Map();let submits=0;let lose=true;
@@ -103,4 +105,28 @@ test('offline draft load preserves IDs until the successful retry',async()=>{
  assert.deepEqual(saved,snapshot);
  const restored=await resolveDraftAssets(saved,async id=>({id,width:1024,height:1024}));
  assert.equal(restored.base.id,'target');assert.equal(restored.out.id,'result');assert.deepEqual(restored.warnings,[]);
+});
+test('SwinIR preview follows the same round-half-up sizes and limits',()=>{
+ const limits=JSON.parse(readFileSync(new URL('../upscale_limits.json',import.meta.url)));
+ for(const [factor,width,height] of [[2,3840,2176],[1.5,2880,1632],[4,7680,4352]]){
+  const p=upscalePlan(1920,1088,{...upscaleDefaults,factor},limits);assert.equal(p.width,width);assert.equal(p.height,height);
+ }
+ assert.equal(upscalePlan(11,13,{...upscaleDefaults,factor:1.5},limits).width,17);
+ for(const options of [{factor:NaN},{factor:5},{tile:193},{overlap:192},{mode:'size',width:100,height:100}])assert.throws(()=>upscalePlan(1920,1088,{...upscaleDefaults,...options},limits));
+});
+test('old drafts gain SwinIR defaults; new drafts retain local options',async()=>{
+ assert.deepEqual(restoreUpscaleOptions(undefined),upscaleDefaults);
+ const options={...upscaleDefaults,mode:'size',width:3000,height:2000,fit:'crop',tile:128,overlap:16};
+ await writeRecord('drafts',{id:'upscale-options',revision:1,payload:{upscaleOptions:options}});
+ assert.deepEqual(restoreUpscaleOptions((await readRecord('drafts','upscale-options')).payload.upscaleOptions),options);
+});
+
+test('unified upscale mode and selected source survive validated draft recovery',async()=>{
+ const payload={p:{mode:'upscale'},upscaleSource:'result',upscaleOptions:{...upscaleDefaults,factor:1.5},targetId:'base',resultId:'generated'};
+ await writeRecord('drafts',{id:'unified-upscale',revision:1,payload});
+ const recovered=recoverDraft((await readRecord('drafts','unified-upscale')).payload,{mode:'polish'});
+ assert.equal(recovered.payload.p.mode,'upscale');assert.equal(recovered.payload.upscaleSource,'result');
+ assert.equal(recovered.payload.upscaleOptions.factor,1.5);
+ const assets=await resolveDraftAssets(recovered.payload,async id=>({id,width:1024,height:800}));
+ assert.equal(assets.base.id,'base');assert.equal(assets.out.id,'generated');
 });

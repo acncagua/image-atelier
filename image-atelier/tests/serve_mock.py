@@ -13,7 +13,10 @@ import uvicorn
 
 folder=Path(__file__).resolve().parents[1]/'.tmp'/'fixes-browser'
 gate=threading.Event()
-app=create_app(folder,True,mock_gate=gate,port=18792)
+app=create_app(folder,True,mock_gate=gate,port=18792,gpu_runner=Path(__file__).parent/'fake_upscale_runner.py')
+fake_model=folder/'mock-model.pth'
+if not fake_model.exists():fake_model.write_text('normal','utf-8')
+app.state.gpu.configure({'python':sys.executable,'model':str(fake_model.resolve())})
 s=app.state.store
 s.set_settings({'output':str(folder/'exports'),'budget':0,'reservation':1,'live':False})
 if not s.jobs():

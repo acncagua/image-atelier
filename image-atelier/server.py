@@ -12,16 +12,20 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from core import ROOT, CAP, ROLES, Store, Worker, prompt_for, JobConflict, JobNotFound, AssetNotFound
 from persistence import now, safe_id
 from imaging import normalize, png
 from PIL import Image, ImageOps
 from local_config import api_key
+from upscale_jobs import UpscaleJobs
+from upscale_geometry import plan as upscale_plan
 
-def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
+def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None):
     store=Store(data_path or ROOT/'data')
     token=secrets.token_urlsafe(32)
     worker=Worker(store,mock_gate=mock_gate)
+    gpu=UpscaleJobs(store,runner=gpu_runner)
     @asynccontextmanager
     async def lifespan(app):
         lock_file=None
@@ -35,15 +39,19 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
                 raise RuntimeError('Image Atelierは既に起動しています。二重起動を停止しました。')
         try:store.recover()
         except Exception as error:worker.fault(error)
+        gpu.recover()
         if run_worker: worker.thread.start()
+        if run_worker: gpu.thread.start()
         yield
         worker.stop.set()
+        gpu.shutdown()
         if run_worker: worker.thread.join()
         if lock_file: lock_file.close()
     app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
     app.state.store=store
     app.state.token=token
     app.state.worker=worker
+    app.state.gpu=gpu
     app.state.test_asset_fault=False
 
     @app.middleware('http')
@@ -196,6 +204,32 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791):
 
     @app.post('/api/prompt')
     async def prompt(request:Request): return {'prompt':prompt_for(await body(request))}
+
+    @app.get('/api/upscale/config')
+    def upscale_config():return gpu.public_config()
+
+    @app.post('/api/upscale/config')
+    async def upscale_configure(request:Request):return gpu.configure(await body(request))
+
+    @app.post('/api/upscale/plan')
+    async def upscale_preview(request:Request):
+        p=await body(request);source=store.meta(p['source_id'])
+        return upscale_plan(source['width'],source['height'],p.get('options',{}))
+
+    @app.get('/api/upscale/jobs')
+    def upscale_jobs():return [gpu.public(j) for j in gpu.jobs()]
+
+    @app.get('/api/upscale/jobs/{ident}')
+    def upscale_job(ident:str):return gpu.public(gpu.get(ident))
+
+    @app.post('/api/upscale/jobs')
+    async def upscale_submit(request:Request):return await run_in_threadpool(gpu.submit,await body(request))
+
+    @app.post('/api/upscale/jobs/{ident}/cancel')
+    def upscale_cancel(ident:str):return gpu.cancel(ident)
+
+    @app.post('/api/upscale/jobs/{ident}/save')
+    def upscale_save(ident:str):return gpu.retry_save(ident)
 
     @app.post('/api/jobs')
     async def submit(request:Request):

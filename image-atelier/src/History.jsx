@@ -1,11 +1,12 @@
 import React from 'react';
-import {imageURL} from './api';
+import {api,imageURL} from './api';
 const names={queued:'待機中',sending:'送信中・生成中',completed:'完了',failed:'失敗',unknown:'API結果不明',local_error:'ローカル処理失敗（応答回収可）',cancelled:'待機取消'};
-export default function History({jobs,onLoad,onResult,onEdit,onCancel,onReprocess}){
- return <section className="history"><h2>履歴・ジョブ <small>{jobs.length}件</small></h2>
- {jobs.length===0?<div className="empty">まだ履歴がありません<span>画像を編集して、ここに履歴が表示されます</span></div>:
- <div className="table-scroll"><table><thead><tr><th>日時・状態</th><th>指示文</th><th>モデル・寸法</th><th>結果・操作</th></tr></thead>
- <tbody>{jobs.map(j=><tr key={j.id}>
+export default function History({jobs,onLoad,onResult,onEdit,onCancel,onReprocess,onGPULoad,gpuJobs=[],onGPURefresh}){
+ const merged=[...jobs,...gpuJobs].sort((a,b)=>Date.parse(b.created)-Date.parse(a.created));
+ return <section className="history"><h2>履歴・ジョブ <small>{merged.length}件</small></h2>
+ {merged.length===0?<div className="empty">まだ履歴がありません<span>画像を編集して、ここに履歴が表示されます</span></div>:
+ <div className="table-scroll"><table><thead><tr><th>日時・状態</th><th>指示文・処理</th><th>モデル・寸法</th><th>結果・操作</th></tr></thead>
+ <tbody>{merged.map(j=>j.kind==='local_gpu'?<tr key={'gpu:'+j.id}><td>{new Date(j.created).toLocaleString('ja-JP')}<strong className="status">{({queued:'待機',loading:'モデル読込',upscaling:'拡大処理',adjusting:'サイズ調整',saving:'保存',completed:'完了',failed:'失敗',cancelled:'取消',cancel_requested:'取消要求中',interrupted:'中断',export_failed:'保存失敗'})[j.status]} · ローカルGPU</strong><small>{j.elapsed??0}秒</small></td><td>{j.params.kind==='diagnostic'?'GPU環境診断':'アップスケール'}<small>{j.message}</small>{j.total?<small>{j.done}/{j.total} タイル</small>:null}</td><td>SwinIR / FP32<small>{j.params.options?.width} × {j.params.options?.height}</small><small>API料金なし</small></td><td>{j.output?<div className="result-thumbs"><div className="history-output"><button onClick={()=>onResult(j.output)} aria-label="SwinIR結果を拡大表示"><img src={imageURL(j.output.id)} alt="SwinIR結果"/></button><button onClick={()=>onEdit({params:j.params.context||{}},j.output)}>次の編集対象にする</button><a href={'/api/assets/'+j.output.id+'/download'} download>PNGダウンロード</a></div></div>:null}{['queued','loading','upscaling','adjusting','saving'].includes(j.status)?<button onClick={async()=>{try{await api('upscale/jobs/'+j.id+'/cancel',{});await onGPURefresh();}catch(e){window.alert(e.message);}}}>取消</button>:null}{j.result_available&&['export_failed','interrupted','failed'].includes(j.status)?<button onClick={async()=>{try{await api('upscale/jobs/'+j.id+'/save',{});await onGPURefresh();}catch(e){window.alert(e.message);}}}>保存を再試行（再推論なし）</button>:null}<>{j.params.source_id?<button onClick={()=>onGPULoad(j)}>条件を復元・新しく実行の準備</button>:null}</><details><summary>記録</summary><pre>{JSON.stringify(j,null,2)}</pre></details></td></tr>:<tr key={j.id}>
  <td>{new Date(j.created).toLocaleString('ja-JP')}<strong className={'status '+j.status}>{names[j.status]} · {j.params.provider==='mock'?'モック':'実API'}</strong><small>{j.elapsed??(j.started?Math.max(0,Math.floor(Date.now()/1000-j.started)):0)}秒</small></td>
  <td><div className="truncate">{j.params.change||j.params.prompt}</div><small>{j.message}</small>{j.status==='unknown'?<p className="warning">再実行は追加課金の可能性があります。</p>:null}</td>
  <td>{j.params.model.replace('gpt-image-','')} / {j.params.quality}<small>要求 {j.params.width} × {j.params.height}</small><small>費用概算: {j.estimate==null?'不明':'USD '+j.estimate.toFixed(5)} / {j.budget_status==='settled_estimate'?'概算精算':'予約'} ${j.reserved.toFixed(5)}</small></td>

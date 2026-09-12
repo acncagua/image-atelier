@@ -10,3 +10,7 @@
 
 .result-thumbs{flex-wrap:wrap}.history-output{display:flex;flex-direction:column;align-items:flex-start;gap:3px}.history-output>button:last-child{white-space:nowrap;padding:5px 7px}.history-output>small{max-width:135px;overflow-wrap:anywhere}
 .workspace-status{padding:10px 20px;background:#f1f8f8;display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:12px}.workspace-status button{font-size:12px}.workspace-status details button{display:block}aside pre{max-height:180px;overflow:auto;white-space:pre-wrap;font-size:11px}.status.local_error{color:#a25c20}
+
+.upscale-dialog{width:min(740px,calc(100vw - 24px));max-height:90dvh;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff;color:inherit;padding:24px}.upscale-dialog::backdrop{background:#182533aa}.upscale-dialog>label{display:flex;justify-content:space-between;align-items:center;margin:12px 0;gap:12px}.upscale-dialog input[type=number]{width:120px}.upscale-input{display:flex;align-items:center;gap:18px}.upscale-input img{width:140px;height:95px;object-fit:contain;background:#f1f4f7}.upscale-plan{background:#edf7f7;padding:14px;border-radius:5px}.upscale-dialog details{margin:14px 0}.upscale-dialog .field{margin:10px 0}
+
+[hidden]{display:none!important}.upscale-controls{padding:16px;border:1px solid #d9dce2;border-radius:8px;margin:12px 0}.upscale-controls>label{display:inline-flex;gap:8px;margin:8px 16px 8px 0;align-items:center}

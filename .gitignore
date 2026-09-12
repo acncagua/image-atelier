@@ -19,3 +19,8 @@ image-atelier/qa/
 **/*.key
 image-atelier/docs/*.png
 image-atelier/live_validation.py
+image-atelier/.venv-swinir/
+image-atelier/models/
+**/*.pth
+**/*.pt
+**/*.safetensors

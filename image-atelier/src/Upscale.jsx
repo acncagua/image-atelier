@@ -1,0 +1,35 @@
+import React,{useEffect,useRef,useState} from 'react';
+import {api} from './api';
+import {Registration,readRecord} from './workspace';
+import {upscalePlan} from './upscalePlan';
+export {upscaleDefaults} from './upscalePlan';
+const labels={queued:'待機',loading:'モデル読込',upscaling:'拡大処理',adjusting:'サイズ調整',saving:'保存',completed:'完了',failed:'失敗',cancelled:'取消',cancel_requested:'取消要求中',interrupted:'中断',export_failed:'保存失敗'};
+export default function UpscaleControls({asset,context,options,setOptions,draftId,flushDraft,jobs,onRefresh,onRegistered,onAvailability,source,setSource}){
+ const [config,setConfig]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState(null);
+ const [registrationReady,setRegistrationReady]=useState(false);
+ const manager=useRef(null),gate=useRef(false);
+ useEffect(()=>{if(!draftId)return;let alive=true;setRegistrationReady(false);api('upscale/config').then(c=>{if(alive)setConfig(c);}).catch(e=>{if(alive)setError(e.message);});
+  const registration=new Registration('upscale:'+draftId,(path,body)=>api('upscale/'+path,body));manager.current=registration;
+  readRecord('registrations','upscale:'+draftId).then(record=>{if(!alive)return;registration.record=record||null;setPending(record||null);setRegistrationReady(true);}).catch(e=>{if(alive)setError(e.message);});
+  return()=>{alive=false;};
+  
+ },[draftId]);
+ let preview=null,validation='';try{if(config&&asset)preview=upscalePlan(asset.width,asset.height,options,config.limits);}catch(e){validation=e.message;}
+ async function run(kind){if(gate.current||busy||!registrationReady||['unsaved','unconfirmed'].includes(manager.current?.record?.state)||(kind==='upscale'&&!preview))return;gate.current=true;setBusy(true);setError('');try{await flushDraft();const job=await manager.current.begin(kind==='diagnostic'?{kind}:{kind,source_id:asset.id,options,context});onRegistered(job);await onRefresh();setError('登録しました: '+job.id.slice(0,8)+'。進行状況は履歴・ジョブで確認できます。');}catch(e){setError(e.message);}finally{setPending(manager.current.record);gate.current=false;setBusy(false);}}
+ async function confirm(){if(gate.current)return;gate.current=true;setBusy(true);try{const job=await manager.current.reconcile();onRegistered(job);await onRefresh();}catch(e){setError(e.message);}finally{setPending(manager.current.record);gate.current=false;setBusy(false);}}
+ const unresolved=['unsaved','unconfirmed'].includes(pending?.state);
+ const available=!!preview&&registrationReady&&!busy&&!unresolved;
+ useEffect(()=>{onAvailability(available);},[available,onAvailability]);
+ function dimension(key,value){if(!asset)return;const next=Number(value);setOptions(p=>({...p,[key]:next,...(p.lock?{[key==='width'?'height':'width']:Math.floor(next*(key==='width'?asset.height/asset.width:asset.width/asset.height)+.5)}:{})}));}
+ const last=jobs.find(j=>j.environment&&j.status==='completed');
+ const active=jobs.find(j=>j.id===(pending?.jobId||pending?.payload?.id));
+ return <form noValidate id="upscale-execution" className="upscale-controls" onSubmit={e=>{e.preventDefault();run('upscale');}}><h2>アップスケール <small>ローカルGPU・API料金なし</small></h2><label>対象画像 <select aria-label="アップスケール対象" value={source} onChange={e=>setSource(e.target.value)}><option value="target">元画像</option><option value="result">生成後の画像（結果）</option></select></label>{asset?<p>入力: {asset.width}×{asset.height}</p>:<p className="warning">対象画像がありません。元画像を読み込むか、履歴から結果を表示してください。</p>}
+
+ {config?<><p>モデル: {config.model.split(/[\\/]/).at(-1)||'未設定'} · ネイティブ倍率は読込時に検証します。</p>{last?<small>最終実行の診断: {last.environment.gpu} / {last.environment.torch} / {last.environment.native_scale}倍</small>:null}<label>指定方式 <select aria-label="拡大の指定方式" value={options.mode} onChange={e=>setOptions({...options,mode:e.target.value,...(e.target.value==='size'&&preview?{width:preview.width,height:preview.height}:{})})}><option value="factor">倍率</option><option value="size">解像度</option></select></label>
+ {options.mode==='factor'?<label>倍率 <input aria-label="拡大倍率" type="number" min="1.01" max="4" step="any" value={options.factor} onChange={e=>setOptions({...options,factor:Number(e.target.value)})}/></label>:<div className="inline"><label>幅 <input aria-label="拡大後の幅" type="number" value={options.width} onChange={e=>dimension('width',e.target.value)}/></label><label>高さ <input aria-label="拡大後の高さ" type="number" value={options.height} onChange={e=>dimension('height',e.target.value)}/></label><label><input type="checkbox" checked={options.lock} onChange={e=>setOptions({...options,lock:e.target.checked})}/>縦横比ロック</label></div>}
+ <label>縦横比が違う場合 <select aria-label="拡大の縦横比処理" value={options.fit} onChange={e=>setOptions({...options,fit:e.target.value})}><option value="pad">透明余白を追加</option><option value="crop">中央を切り抜き</option><option value="stretch">変形</option></select></label>
+ {preview?<p className="upscale-plan">出力予定: <strong>{preview.width}×{preview.height} PNG</strong><small>SwinIRで{preview.nativeWidth}×{preview.nativeHeight}へ4倍推論 → 指定寸法へ調整</small><small>CPUメモリ概算: 約{(asset.width*asset.height*832/1024**3).toFixed(2)} GiB＋実行環境</small></p>:<p className="warning">{validation}</p>}
+ <details><summary>詳細・環境設定</summary><div className="inline"><label>タイル <input aria-label="SwinIRタイル" type="number" step="8" min="32" max="512" value={options.tile} onChange={e=>setOptions({...options,tile:Number(e.target.value)})}/></label><label>重なり <input aria-label="SwinIR重なり" type="number" min="0" value={options.overlap} onChange={e=>setOptions({...options,overlap:Number(e.target.value)})}/></label></div><label className="field">推論用Python<input value={config.python} onChange={e=>setConfig({...config,python:e.target.value})}/></label><label className="field">ローカルモデルの絶対パス<input value={config.model} onChange={e=>setConfig({...config,model:e.target.value})}/></label><button type="button" onClick={async()=>{try{await api('upscale/config',config);setConfig(await api('upscale/config'));setError('環境設定を保存しました。');}catch(e){setError(e.message);}}}>環境設定を保存</button><button type="button" disabled={busy||unresolved||!registrationReady} onClick={()=>run('diagnostic')}>GPU・モデルを診断</button><p>FP32、autocast無効、torch.compile無効。CUDAなしの場合は失敗として通知します。CPUには自動で切り替えません。</p></details><small>入力は各辺2048px以下・2,097,152画素以下。最大4倍・33,554,432画素。4倍超とモデルの繰り返し適用は対象外です。ReForgeと同時にGPUを使う場合の空き容量は共有されます。</small></>:<p>環境設定を読み込み中…</p>}
+ {config?.worker_error?<p className="warning">{config.worker_error}</p>:null}{active?<p>{labels[active.status]} {active.total?`${active.done}/${active.total} タイル`:''}{['queued','loading','upscaling','adjusting','saving'].includes(active.status)?<button type="button" onClick={async()=>{try{await api('upscale/jobs/'+active.id+'/cancel',{});await onRefresh();}catch(e){setError(e.message);}}}>この拡大を取消</button>:null}</p>:null}
+ {error?<p role="status">{error}</p>:null}{unresolved?<p>{pending.state==='unsaved'?'登録情報の保存失敗・未送信です。':'送信結果が未確認です。'}入力とIDを固定して保持しています。</p>:null}{unresolved?<button type="button" disabled={busy} onClick={confirm}>登録状況を確認（同じID）</button>:null}<p role="status">{busy?'登録中…':!preview?'有効な対象画像と寸法を指定してください。':''}</p></form>;
+}

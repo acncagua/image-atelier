@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import uuid
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 
@@ -29,7 +30,15 @@ def atomic_write(path,content):
     try:
         with temporary.open('xb') as output:
             output.write(content);output.flush();os.fsync(output.fileno())
-        os.replace(temporary,path)
+        for attempt in range(20):
+            try:
+                os.replace(temporary,path)
+                break
+            except PermissionError:
+                if os.name!='nt' or attempt==19:raise
+                # Short-lived readers (including Windows sync/indexing) may deny
+                # replacement. Retry this same durable file, never the inference.
+                time.sleep(.05)
     finally:
         if temporary.exists():temporary.unlink()
 
