@@ -15,10 +15,15 @@ class Geometry(unittest.TestCase):
         for factor,size in [(2,(3840,2176)),(1.5,(2880,1632)),(4,(7680,4352))]:
             p=plan(1920,1088,{'factor':factor});self.assertEqual((p['width'],p['height']),size)
         self.assertEqual(plan(11,13,{'factor':1.5})['width'],17)
+    def test_square_2048_input_limit(self):
+        self.assertEqual(plan(2048,2048,{'factor':2})['width'],4096)
+        self.assertEqual(plan(1152,2048,{'factor':2})['height'],4096)
+        with self.assertRaises(ValueError):plan(2048,2049,{'factor':2})
+        with self.assertRaises(ValueError):plan(2048,2048,{'factor':4})
     def test_invalid_inputs(self):
         for options in [{'factor':1},{'factor':4.01},{'factor':float('nan')},{'factor':float('inf')},{'mode':'size','width':100.5,'height':120},{'mode':'size','width':40,'height':40},{'tile':193},{'overlap':192},{'overlap':-1}]:
             with self.assertRaises(ValueError):plan(100,100,options)
-        with self.assertRaises(ValueError):plan(2048,2048,{})
+        with self.assertRaises(ValueError):plan(2049,2048,{})
         with self.assertRaises(ValueError):plan(1920,1088,{'tile':32,'overlap':31})
     def test_pad_crop_stretch_geometry(self):
         image=Image.new('RGB',(16,8),'red')

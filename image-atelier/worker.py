@@ -1,4 +1,5 @@
 """Single worker and idempotent LOCAL response processing. Resume never resends."""
+from billing import api_error_message
 import base64
 import json
 import threading
@@ -106,7 +107,7 @@ class Worker:
             except httpx.HTTPStatusError as error:
                 if job:
                     status=error.response.status_code
-                    job.update(status='unknown' if status>=500 or status==408 else 'failed',phase='api_error',request_id=error.response.headers.get('x-request-id'),message=f'HTTP {status}。自動再送しません。')
+                    job.update(status='unknown' if status>=500 or status==408 else 'failed',phase='api_error',request_id=error.response.headers.get('x-request-id'),message=api_error_message(error.response))
                     if job['status']=='failed':job['reserved']=0
                     self.persist(job)
             except Exception as error:
@@ -121,7 +122,7 @@ class Worker:
                     except Exception:saved=False
                     job.update(status='local_error' if saved else ('unknown' if attempted else 'failed'),
                                phase='response_saved' if saved else ('dispatch_uncertain' if attempted else 'preflight_failed'),
-                               error_type=type(error).__name__,message='保存応答のローカル再処理が必要です。API再送はしません。' if saved else ('送信結果を確認できません。予約を保持し、API再送しません。' if attempted else '送信前に失敗しました。'))
+                               error_type=type(error).__name__,message='保存応答のローカル再処理が必要です。API再送はしません。' if saved else ('課金・生成結果を確認できません。料金不明として保持し、自動再送しません。' if attempted else '送信前に失敗しました。'))
                     if not attempted:job['reserved']=0
                     self.persist(job)
                 if isinstance(error,(OSError,core.sqlite3.Error)):self.fault(error)

@@ -16,7 +16,7 @@ def plan(width,height,options):
     if type(width) is not int or type(height) is not int or min(width,height)<=0:
         raise ValueError('入力寸法が不正です。')
     if max(width,height)>LIMITS['max_input_edge'] or width*height>LIMITS['max_input_pixels']:
-        raise ValueError('入力は各辺2048px以下・2,097,152画素以下です。通常リサイズで調整してください。')
+        raise ValueError('入力は各辺2048px以下・4,194,304画素以下です。通常リサイズで調整してください。')
     mode=options.get('mode','factor');policy=options.get('fit','pad')
     if policy not in ('pad','crop','stretch'):raise ValueError('縦横比の処理方法が不正です。')
     if mode=='factor':

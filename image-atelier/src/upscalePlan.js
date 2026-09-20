@@ -6,7 +6,7 @@ export function restoreUpscaleOptions(saved){
 }
 export function upscalePlan(width,height,p,limits){
  if(!Number.isInteger(width)||!Number.isInteger(height)||Math.min(width,height)<=0)throw Error('入力寸法が不正です。');
- if(Math.max(width,height)>limits.max_input_edge||width*height>limits.max_input_pixels)throw Error('入力は各辺2048px以下・2,097,152画素以下です。');
+ if(Math.max(width,height)>limits.max_input_edge||width*height>limits.max_input_pixels)throw Error('入力は各辺2048px以下・4,194,304画素以下です。');
  let w,h;
  if(p.mode==='factor'){
   if(!Number.isFinite(p.factor)||p.factor<=1||p.factor>4)throw Error('倍率は1倍超〜4倍で指定してください。');

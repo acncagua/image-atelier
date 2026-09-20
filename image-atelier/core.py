@@ -1,3 +1,4 @@
+from billing import usage_summary
 import copy
 import base64
 import hashlib
@@ -103,7 +104,7 @@ class Store:
     def settings(self):
         with self.lock:
             row = self.db.execute("SELECT body FROM settings WHERE id='config'").fetchone()
-        return json.loads(row[0]) if row else {'output':str(ROOT/'output'), 'budget':0, 'reservation':1, 'live':False}
+        return {'output':str(ROOT/'output'),'budget':5,'reservation':0.5,'live':False,'limit_mode':'notify','budget_period':'day',**(json.loads(row[0]) if row else {})}
 
     def set_settings(self, data):
         with self.lock:
@@ -245,10 +246,11 @@ class Store:
             if p['provider']=='openai':
                 if not settings['live'] or not api_key():
                     raise ValueError('APIキーのローカル設定と設定画面の実API有効化が必要です。')
-                reserved=settings['reservation']*p.get('n',1)
-                held=sum(j.get('reserved',0) for j in self.jobs())
-                if reserved<=0 or held+reserved>settings['budget']:
-                    raise ValueError('アプリ予算の残りが予約額を下回ります。予算と1回の予約額を確認してください。')
+                if settings['limit_mode']=='stop':
+                    reserved=settings['reservation']*p.get('n',1)
+                    accounted=usage_summary(self.jobs(),settings)['limit_accounted']
+                    if reserved<=0 or accounted+reserved>settings['budget']:
+                        raise ValueError('Atelierで設定した利用上限に達するため登録できません。設定の制限方法・金額を確認してください。OpenAIの残高不足ではありません。')
             job={'id':p['id'],'fingerprint':digest,'params':p,'status':'queued','created':datetime.now(timezone.utc).isoformat(),'reserved':reserved,'estimate':None,'message':'待機中','outputs':[]}
             self.db.execute('INSERT INTO jobs VALUES (?,?,?)',(job['id'],digest,json.dumps(job,ensure_ascii=False)))
             self.db.commit()

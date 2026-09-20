@@ -22,7 +22,7 @@ class Fixes(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.app=create_app(Path(self.tmp.name)/'日本語 data',False)
         self.s=self.app.state.store
-        self.s.set_settings({'output':str(Path(self.tmp.name)/'exports'),'budget':10,'reservation':1,'live':True})
+        self.s.set_settings({'output':str(Path(self.tmp.name)/'exports'),'budget':10,'reservation':1,'live':True,'limit_mode':'stop','budget_period':'all'})
         self.a=self.s.asset(png(Image.new('RGB',(1024,1024),'navy')))
         self.client=TestClient(self.app)
         self.client.headers['X-Atelier-Token']=self.app.state.token

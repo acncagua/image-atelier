@@ -1,6 +1,6 @@
 {
   "native_scale": 4,
-  "max_input_pixels": 2097152,
+  "max_input_pixels": 4194304,
   "max_input_edge": 2048,
   "max_output_pixels": 33554432,
   "max_output_edge": 8192,

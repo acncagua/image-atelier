@@ -130,3 +130,57 @@ test('unified upscale mode and selected source survive validated draft recovery'
  const assets=await resolveDraftAssets(recovered.payload,async id=>({id,width:1024,height:800}));
  assert.equal(assets.base.id,'base');assert.equal(assets.out.id,'generated');
 });
+import {instructionPresets,composeInstructions,parseInstructions,restoreInstructions} from '../src/instructionPresets.js';
+test('instruction presets compose selected templates and extra text without duplication',()=>{
+ const e={selected:['polish','expression'],values:{expression:'少し困った笑顔'},extra:'文字は読みやすくしてください。'};
+ const text=composeInstructions('change',e);
+ assert.ok(text.includes('【少し困った笑顔】'));assert.ok(text.endsWith(e.extra));
+ assert.deepEqual(parseInstructions('change',text),e);
+ assert.equal(composeInstructions('change',{...e,selected:[]}),e.extra);
+});
+test('all 17 templates roundtrip including parameter defaults',()=>{
+ assert.equal(instructionPresets.change.length,9);assert.equal(instructionPresets.keep.length,8);
+ for(const kind of ['change','keep'])for(const preset of instructionPresets[kind]){
+  const text=composeInstructions(kind,{selected:[preset[0]],values:{},extra:''});
+  const restored=parseInstructions(kind,text);assert.deepEqual(restored.selected,[preset[0]]);
+  assert.equal(composeInstructions(kind,restored),text);
+ }
+});
+test('legacy manual instructions and mixed historical ordering are preserved exactly',()=>{
+ for(const text of ['顔立ちを維持する。\n自由な指示\n','手入力\n'+instructionPresets.keep[0][2],'']){
+  assert.equal(composeInstructions('keep',restoreInstructions('keep',text,null)),text);
+ }
+});
+test('draft restore retains deselected parameter values but rejects stale selections',()=>{
+ const e={selected:[],values:{expression:'怒った顔'},extra:'手入力'};
+ assert.deepEqual(restoreInstructions('change','手入力',e),e);
+ assert.deepEqual(restoreInstructions('change','別の履歴の指示',e),{selected:[],values:{},extra:'別の履歴の指示'});
+ assert.deepEqual(restoreInstructions('change','元の文章',{selected:['unknown'],values:{},extra:''}),{selected:[],values:{},extra:'元の文章'});
+});
+
+import {historyPage} from '../src/historyPages.js';
+test('history pagination shows all records exactly once across 20-item pages',()=>{
+ const items=Array.from({length:41},(_,id)=>({id}));
+ const pages=[1,2,3].map(n=>historyPage(items,n));
+ assert.deepEqual(pages.map(p=>p.items.length),[20,20,1]);
+ assert.deepEqual(pages.flatMap(p=>p.items),items);
+ assert.equal(historyPage(items,99).page,3);
+ assert.equal(historyPage([],3).page,1);assert.equal(historyPage([],3).start,0);
+ assert.equal(historyPage(items.slice(0,20),2).page,1);
+});
+
+test('upscale input accepts 2048 square and rejects an oversized edge',()=>{
+ const limits=JSON.parse(readFileSync(new URL('../upscale_limits.json',import.meta.url)));
+ assert.equal(upscalePlan(2048,2048,upscaleDefaults,limits).width,4096);
+ assert.equal(upscalePlan(1152,2048,upscaleDefaults,limits).height,4096);
+ assert.throws(()=>upscalePlan(2049,2048,upscaleDefaults,limits));
+ assert.throws(()=>upscalePlan(2048,2048,{...upscaleDefaults,factor:4},limits));
+});
+
+import {forecastCost} from '../src/usageData.js';
+test('cost forecast excludes mocks, unknown prices and other settings',()=>{
+ const p={mode:'polish',model:'test',quality:'medium',width:1024,height:1024,n:2};
+ const j={params:{...p,provider:'openai',n:1},status:'completed',estimate:.04};
+ assert.equal(forecastCost([{...j,estimate:null}],p),null);
+ assert.deepEqual(forecastCost([j,{...j,estimate:10,params:{...j.params,provider:'mock'}},{...j,estimate:5,params:{...j.params,width:2048}}],p),{amount:.08,samples:1});
+});

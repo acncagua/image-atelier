@@ -22,7 +22,7 @@ class Tests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.s=Store(Path(self.temp.name)/'日本語 空白')
-        self.s.set_settings({'output':str(Path(self.temp.name)/'保存 画像'),'budget':2,'reservation':1,'live':True})
+        self.s.set_settings({'output':str(Path(self.temp.name)/'保存 画像'),'budget':2,'reservation':1,'live':True,'limit_mode':'stop','budget_period':'all'})
         self.a=self.s.asset(png(Image.new('RGBA',(1024,1024),(15,44,78,255))),'元画像.png')
     def tearDown(self):
         self.s.db.close();self.temp.cleanup()

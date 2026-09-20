@@ -1,3 +1,4 @@
+from billing import usage_summary
 import base64
 import io
 import json
@@ -269,14 +270,30 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         if job is None:raise ValueError('取消できるのは待機中だけです。送信済み処理の課金は取り消せません。')
         return job
 
+    @app.post('/api/output-folder/open')
+    def open_output_folder():
+        if os.name!='nt':raise HTTPException(400,'フォルダーを開く操作はWindowsで利用できます。')
+        folder=Path(store.settings()['output']).expanduser().resolve()
+        try:
+            folder.mkdir(parents=True,exist_ok=True)
+            os.startfile(str(folder),'explore')
+        except OSError:
+            raise HTTPException(400,'保存先フォルダーを開けません。設定の保存先とアクセス権を確認してください。') from None
+        return {'path':str(folder)}
+
     @app.post('/api/export')
     async def export(request:Request): return {'path':store.export((await body(request))['id'])}
+
+    @app.get('/api/usage-summary')
+    def usage():return usage_summary(store.jobs(),store.settings())
 
     @app.post('/api/settings')
     async def settings(request:Request):
         p=await body(request)
-        config={'output':str(p['output']),'budget':float(p['budget']),'reservation':float(p['reservation']),'live':p['live'] is True}
+        config={'limit_mode':p.get('limit_mode','notify'),'budget_period':p.get('budget_period','day'),'output':str(p['output']),'budget':float(p['budget']),'reservation':float(p['reservation']),'live':p['live'] is True}
         if any(not math.isfinite(config[k]) or config[k]<0 for k in ('budget','reservation')): raise ValueError('予算は0以上の数値で指定してください。')
+        if config['limit_mode'] not in ('off','notify','stop') or config['budget_period'] not in ('day','month','all'):raise ValueError('料金管理の設定が不正です。')
+        if config['limit_mode']=='stop' and (config['budget']<=0 or config['reservation']<=0):raise ValueError('停止上限と1枚の仮計上額は0より大きい値を指定してください。')
         if not Path(config['output']).is_absolute(): raise ValueError('保存先は絶対パスで指定してください。')
         store.set_settings(config); return config
 
