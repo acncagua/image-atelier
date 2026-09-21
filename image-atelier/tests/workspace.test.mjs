@@ -202,3 +202,10 @@ test('Qwen reference capacities leave slots for source and edit mask',()=>{
  assert.equal(referenceLimit({model:QWEN_MODEL,mode:'inpaint'}),8);
  assert.equal(referenceLimit({model:'gpt-image-2.5-sunburst',mode:'inpaint'}),7);
 });
+
+test('random Qwen seed remains minus one in restored editor settings',()=>{
+ const defaults={mode:'polish',provider:'mock',model:QWEN_MODEL,quality:'medium',format:'png',width:512,height:512,...qwenDefaults};
+ const p={...defaults,qwen_seed:-1};
+ assert.equal(qwenProblem(p),'');assert.ok(qwenProblem({...p,qwen_seed:-2}));
+ assert.equal(recoverDraft({p,refs:[],strokes:[],redo:[]},defaults).payload.p.qwen_seed,-1);
+});

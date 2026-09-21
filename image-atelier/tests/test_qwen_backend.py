@@ -35,6 +35,19 @@ class QwenJobs(unittest.TestCase):
         Worker(self.s).run(job['id'])
         request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
         self.assertEqual(request['inputs'],[str(self.s.file(self.image['id']))])
+    def test_random_seed_resolves_once_per_job_and_preserves_minus_one(self):
+        p=self.params(qwen_seed=-1);job=self.s.submit(p)
+        with patch('qwen_backend.secrets.randbits',side_effect=[101,202]) as random:
+            Worker(self.s).run(job['id'])
+            same=self.s.submit(p);Worker(self.s).run(same['id'])
+            other=self.s.submit(self.params(qwen_seed=-1));Worker(self.s).run(other['id'])
+            self.assertEqual(random.call_count,2)
+        first=self.s.job(job['id']);second=self.s.job(other['id'])
+        self.assertEqual(first['params']['qwen_seed'],-1);self.assertEqual(second['params']['qwen_seed'],-1)
+        self.assertEqual(first['qwen_seed_used'],101);self.assertEqual(second['qwen_seed_used'],202)
+        request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(request['seed'],101)
+        with self.assertRaises(ValueError):self.s.submit(self.params(qwen_seed=-2))
     def test_parameters_are_part_of_idempotency(self):
         p=self.params();self.s.submit(p);self.s.submit(p)
         with self.assertRaises(JobConflict):self.s.submit({**p,'qwen_steps':8})

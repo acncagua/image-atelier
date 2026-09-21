@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 from PIL import Image
@@ -17,7 +18,7 @@ def validate(p):
     if p['mode'] not in ('generate','polish','inpaint'):raise ValueError('Qwenのモードが不正です。')
     if p['n']!=1 or p['format']!='png':raise ValueError('Qwenは1枚・PNGで実行してください。')
     if any(type(p[k]) is not int or p[k]<128 or p[k]>2048 or p[k]%32 for k in ('width','height')):raise ValueError('Qwenの寸法は各辺128〜2048px、32の倍数で指定してください。')
-    for key,low,high in [('qwen_steps',1,50),('qwen_seed',0,4294967295),('qwen_tile',128,1024)]:
+    for key,low,high in [('qwen_steps',1,50),('qwen_seed',-1,4294967295),('qwen_tile',128,1024)]:
         if type(p[key]) is not int or not low<=p[key]<=high:raise ValueError('Qwenパラメータが範囲外です: '+key)
     if p['qwen_offload'] not in ('model','sequential'):raise ValueError('Qwenのオフロード設定が不正です。')
     if p['qwen_tile']%32 or type(p['qwen_stride']) is not int or not 0<p['qwen_stride']<p['qwen_tile'] or p['qwen_stride']%32:raise ValueError('タイルとstrideは32の倍数、strideはタイル未満にしてください。')
@@ -78,13 +79,16 @@ def run(worker,ident):
             job=store.job(ident)
             if job['status']!='queued' or worker.stop.is_set():return
             folder.mkdir(parents=True,exist_ok=True)
+            if 'qwen_seed_used' not in job:
+                requested_seed=job['params']['qwen_seed']
+                job['qwen_seed_used']=secrets.randbits(32) if requested_seed==-1 else requested_seed
             job.update(status='sending',started=time.time(),phase='qwen_loading',message='Qwenモデルを読み込み中（ローカルGPU）')
             store.save_job(job)
         try:
             p=job['params'];machine=job['local_machine']
             request={'model':machine['model'],'inputs':[str(store.file(i)) for i in p['input_ids']],
                      'prompt':p['prompt'],'width':p['width'],'height':p['height'],'steps':p['qwen_steps'],
-                     'seed':p['qwen_seed'],'offload':p['qwen_offload'],'vae_tiling':True,
+                     'seed':job['qwen_seed_used'],'offload':p['qwen_offload'],'vae_tiling':True,
                      'vae_tile_size':p['qwen_tile'],'vae_tile_stride':p['qwen_stride'],'output':str(folder/'result.png')}
             if p['mode']=='inpaint':
                 source=store.meta(p['target'])

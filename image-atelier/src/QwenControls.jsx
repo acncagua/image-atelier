@@ -6,8 +6,8 @@ export default function QwenControls({p,change,target}){
  useEffect(()=>{let alive=true;api('qwen/config').then(c=>{if(alive)setConfig(c);}).catch(e=>{if(alive)setMessage(e.message);});return()=>{alive=false;};},[]);
  return <section className="qwen-controls"><strong>QwenローカルGPU · API料金なし</strong><div className="inline">
   <label>ステップ数<input aria-label="Qwenステップ数" type="number" min="1" max="50" value={p.qwen_steps} onChange={e=>change('qwen_steps',Number(e.target.value))}/></label>
-  <label>シード<input aria-label="Qwenシード" type="number" min="0" max="4294967295" value={p.qwen_seed} onChange={e=>change('qwen_seed',Number(e.target.value))}/></label>
-  <button onClick={()=>change('qwen_seed',crypto.getRandomValues(new Uint32Array(1))[0])}>シードを変更</button>
+  <label>シード<input aria-label="Qwenシード" type="number" min="-1" max="4294967295" value={p.qwen_seed} onChange={e=>change('qwen_seed',Number(e.target.value))}/></label>
+  <button onClick={()=>change('qwen_seed',-1)}>シードを変更</button><small>-1は実行ごとにランダム。実際の値は履歴に記録します。</small>
   <label>CPUオフロード<select aria-label="Qwenオフロード" value={p.qwen_offload} onChange={e=>change('qwen_offload',e.target.value)}><option value="model">標準（model）</option><option value="sequential">省メモリ優先（低速）</option></select></label>
  </div><small>BF16・PNG・1枚。VAE分割を使用します。部分修正は元画像と同寸法で実行。元画像・参照資料・マスクの合計10枚まで。指示文・プリセットはそのまま使用します。</small>
  {qwenProblem(p,target)?<p role="status" className="warning">{qwenProblem(p,target)}</p>:null}
