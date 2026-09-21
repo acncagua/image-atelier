@@ -5,6 +5,7 @@ import Canvas from './Canvas';
 import QwenControls from './QwenControls';
 import {QWEN_MODEL,qwenDefaults,qwenProblem,referenceLimit} from './qwenOptions';
 import ImageViewer from './ImageViewer';
+import PromptEnhancer from './PromptEnhancer';
 import {DropZone,References} from './Inputs';
 import HistoryTabs from './HistoryTabs';
 import UsagePanel from './UsagePanel';
@@ -21,6 +22,7 @@ import {recoverDraft,resolveDraftAssets} from './draftValidation';
 const defaults={...qwenDefaults,mode:'polish',provider:'mock',model:'gpt-image-2.5-sunburst',quality:'medium',width:1920,height:1088,n:1,format:'png',change:'',keep:'顔立ち、表情、構図、髪型、衣装を維持する。肌の塗りと光は編集対象に合わせる。',composite:false,feather:8};
 function App(){
  const [viewerAsset,setViewerAsset]=useState(null);
+ const [peApplied,setPEApplied]=useState(null);
  const [usage,setUsage]=useState(null),[usageError,setUsageError]=useState(''),[retrySource,setRetrySource]=useState(null);
  const refreshUsage=()=>api('usage-summary').then(value=>{setUsage(value);setUsageError('');}).catch(()=>setUsageError('料金集計を取得できません。'));
  useEffect(()=>{refreshUsage();const timer=setInterval(refreshUsage,2000);return()=>clearInterval(timer);},[]);
@@ -35,7 +37,7 @@ function App(){
  const change=(k,v)=>setP(old=>({...old,[k]:v}));
  const act=async fn=>{try{return await fn();}catch(e){setMessage(e.message);}};
  const refresh=async()=>{const [j,l]=await Promise.all([api('jobs'),api('local-edits')]);setJobs(j);setLocalEdits(l);};
- const snapshot=useMemo(()=>({retrySource,instructionEditors,upscaleSource,upscaleOptions,p,targetId:target?.id||null,refs,resultId:result?.id||null,prompt,promptValid,promptArchive,strokes,redo,zoom,pan,brush,tool,lockRatio,tracked,follow}),[retrySource,instructionEditors,upscaleSource,upscaleOptions,p,target,refs,result,prompt,promptValid,promptArchive,strokes,redo,zoom,pan,brush,tool,lockRatio,tracked,follow]);
+ const snapshot=useMemo(()=>({peApplied,retrySource,instructionEditors,upscaleSource,upscaleOptions,p,targetId:target?.id||null,refs,resultId:result?.id||null,prompt,promptValid,promptArchive,strokes,redo,zoom,pan,brush,tool,lockRatio,tracked,follow}),[peApplied,retrySource,instructionEditors,upscaleSource,upscaleOptions,p,target,refs,result,prompt,promptValid,promptArchive,strokes,redo,zoom,pan,brush,tool,lockRatio,tracked,follow]);
  async function restoreDraft(saved,warnings=[]){
   if(!saved||typeof saved!=='object'){setMessage('下書きの形式を確認できません。原データを保護しました。');return;}
   const recovered=recoverDraft(saved,defaults);
@@ -51,6 +53,7 @@ function App(){
   setRetrySource(typeof saved.retrySource==='string'?saved.retrySource:null);loadParameters(next,saved.instructionEditors);setTarget(base);setResult(out);setRefs(references);
   setStrokes(Array.isArray(saved.strokes)?saved.strokes:[]);setRedo(Array.isArray(saved.redo)?saved.redo:[]);
   setPrompt(typeof saved.prompt==='string'?saved.prompt:null);setPromptValid(saved.promptValid===true);setPromptArchive(Array.isArray(saved.promptArchive)?saved.promptArchive:[]);
+  setPEApplied(saved.peApplied?.id?saved.peApplied:null);
   restoredPrompt.current={text:typeof saved.prompt==='string'?saved.prompt:null,valid:saved.promptValid===true};
   setZoom(typeof saved.zoom==='number'?saved.zoom:0);setPan(Array.isArray(saved.pan)?saved.pan:[0,0]);setBrush(saved.brush||40);setTool(saved.tool||'pan');setLockRatio(!!saved.lockRatio);setTracked(Array.isArray(saved.tracked)?saved.tracked:[]);setFollow(saved.follow||null);
   if(warnings.length)setMessage(warnings.join(' / '));
@@ -65,7 +68,7 @@ function App(){
   readRecord('registrations',draft.id).then(record=>{if(!alive)return;manager.record=record||null;setPending(record||null);if(record?.jobId)setTracked(ids=>[...new Set([...ids,record.jobId])]);const legacy=sessionStorage.getItem('pending-job');if(legacy){api('jobs/'+legacy).then(job=>{setTracked(ids=>[...new Set([...ids,job.id])]);sessionStorage.removeItem('pending-job');setMessage('旧版の未確認ジョブを照会しました。自動再送はしていません。');}).catch(()=>setMessage('旧版の登録状況を確認できません。ID '+legacy+' を保持しています。新規登録は別操作です。'));}setRegistrationReady(true);}).catch(e=>setMessage(e.message));
   return()=>{alive=false;};
  },[draft.id]);
- useEffect(()=>{if(!draft.ready)return;if(restoredPrompt.current){setPrompt(restoredPrompt.current.text);setPromptValid(restoredPrompt.current.valid);restoredPrompt.current=null;}else setPromptValid(false);},[p,refs,target,draft.ready]);
+ useEffect(()=>{if(!draft.ready)return;if(restoredPrompt.current){setPrompt(restoredPrompt.current.text);setPromptValid(restoredPrompt.current.valid);restoredPrompt.current=null;}else{setPromptValid(false);setPEApplied(null);}},[p,refs,target,draft.ready]);
  useEffect(()=>{const job=[...jobs,...gpuJobs].find(j=>j.id===follow);if(job&&['completed','failed','unknown','local_error','cancelled','interrupted','export_failed'].includes(job.status)){if(job.output)setResult(job.output);else if(job.outputs?.length)setResult(job.outputs.at(-1));setFollow(null);}},[jobs,gpuJobs,follow]);
  async function acknowledge(job){if(!job)return;setRetrySource(null);setTracked(ids=>[...new Set([...ids,job.id])]);setFollow(job.id);setPending(registration.current.record);setPromptOpen(false);setMessage('ジョブを受け付けました。別の実行は新しいIDで登録できます。');await refresh();}
  async function reconcile(){await act(async()=>{setBusy(true);try{await bootstrap();await acknowledge(await registration.current.reconcile());}finally{setPending(registration.current.record);setBusy(false);}});}
@@ -95,7 +98,7 @@ function App(){
   window.scrollTo({top:0,behavior:'instant'});
  }
  async function files(fs,isRef=false){await act(async()=>{if(!fs.length)return;if(isRef&&refs.length+fs.length>referenceLimit(p)){setMessage('このモードの参照資料は'+referenceLimit(p)+'枚までです。既存の資料を減らしてから追加してください。');return;}const assets=[];for(const f of (isRef?fs:fs.slice(0,1)))assets.push(await upload(f));if(isRef)setRefs(old=>[...old,...assets.map(a=>({id:a.id,role:'face',person:''}))]);else{const image=assets[0];setRetrySource(null);setBase(image);setP(old=>({...old,width:image.width,height:image.height}));}});}
- const params=()=>({...p,provider:isQwen?'qwen':p.provider,target:target?.id||null,refs,strokes});
+ const params=()=>({...p,...(isQwen&&p.mode==='generate'&&!refs.length&&peApplied?{pe_job_id:peApplied.id}:{}),provider:isQwen?'qwen':p.provider,target:target?.id||null,refs,strokes});
  async function preview(){await act(async()=>{if(!promptValid){const r=await api('prompt',params());if(prompt)setPromptArchive(old=>[...old,prompt]);setPrompt(r.prompt);setPromptValid(true);}setPromptOpen(true);});}
  async function execute(){
   if(p.mode==='upscale')return;
@@ -109,7 +112,7 @@ function App(){
   catch(error){setMessage(error.message+(['unconfirmed','unsaved'].includes(registration.current?.record?.state)?' / 登録状況を確認してください。':''));}
   finally{setPending(registration.current?.record);gate.current=false;setBusy(false);}
  }
- async function restore(j){await act(async()=>{const base=j.params.target?await api('assets/'+j.params.target):null;setFollow(null);setRetrySource(j.status==='unknown'?j.id:null);restoredPrompt.current={text:j.params.prompt,valid:true};loadParameters({...defaults,...j.params});setRefs(j.params.refs||[]);setBase(base);setStrokes(j.params.strokes||[]);setResult(j.outputs.at(-1)||null);setMessage('条件を復元しました。再実行する場合は送信指示文を確認してください。同一画像の再現は保証されません。');});}
+ async function restore(j){await act(async()=>{const base=j.params.target?await api('assets/'+j.params.target):null;setFollow(null);setRetrySource(j.status==='unknown'?j.id:null);restoredPrompt.current={text:j.params.prompt,valid:true};setPEApplied(j.prompt_enhancement||null);loadParameters({...defaults,...j.params});setRefs(j.params.refs||[]);setBase(base);setStrokes(j.params.strokes||[]);setResult(j.outputs.at(-1)||null);setMessage('条件を復元しました。再実行する場合は送信指示文を確認してください。同一画像の再現は保証されません。');});}
  async function crop(rect){await act(async()=>{const a=await api('crop',{id:target.id,...rect});setRefs(r=>[...r,{id:a.id,role:'face',person:''}]);setTool('pan');setMessage('選択範囲を顔資料として追加しました。');});}
  function dimension(key,value){const next=Number(value);setP(old=>({...old,[key]:next,...(lockRatio?{[key==='width'?'height':'width']:Math.round(next*(key==='width'?old.height/old.width:old.width/old.height)/(isQwen?32:16))*(isQwen?32:16)}:{})}));}
  const predictedCost=forecastCost(jobs,p);
@@ -141,7 +144,7 @@ function App(){
 
  </main></div>
  {viewerAsset?<ImageViewer key={viewerAsset.id} asset={viewerAsset} onClose={()=>setViewerAsset(null)}/>:null}
- {promptOpen?<div className="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="送信指示文" className="modal"><h2>送信指示文</h2><p>画像の順序と役割を確認してください。ここで編集した文章をそのまま送信します。</p><textarea aria-label="送信指示文" value={prompt||''} onChange={e=>{setPrompt(e.target.value);setPromptValid(true);}}/><p>今回の予想: {isQwen?'API料金なし（ローカル処理）':p.provider==='mock'?'対象外（外部APIは呼びません）':predictedCost?'約 $'+predictedCost.amount.toFixed(4)+'（同条件の履歴に基づく目安）':'不明（比較できる履歴なし）'} · {p.width}×{p.height} · {p.format.toUpperCase()} · {p.n}枚</p><div className="inline"><button onClick={()=>setPromptOpen(false)}>戻る</button><button className="primary" disabled={busy||!registrationReady||!!qwenProblem(p,target)||refs.length>referenceLimit(p)||['unconfirmed','unsaved'].includes(pending?.state)} onClick={execute}>この指示文で実行</button></div></section></div>:null}
+ {promptOpen?<div className="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="送信指示文" className="modal"><h2>送信指示文</h2><p>画像の順序と役割を確認してください。ここで編集した文章をそのまま送信します。</p><textarea aria-label="送信指示文" value={prompt||''} onChange={e=>{setPrompt(e.target.value);setPromptValid(true);}}/>{isQwen&&p.mode==='generate'&&!refs.length?<PromptEnhancer onRestore={text=>{setPromptArchive(old=>[...old,prompt]);setPrompt(text);setPEApplied(null);setPromptValid(true);}} prompt={prompt} draftId={draft.id} flushDraft={draft.flush} onApply={job=>{setPEApplied({id:job.id,source_prompt:job.params.prompt,result:job.result});setPromptArchive(old=>[...old,prompt]);setPrompt(job.result.rewritten_prompt);setPromptValid(true);}}/>:isQwen?<small>PE-T2Iによる補強は、参照画像なしの新規生成で利用できます。</small>:null}<p>今回の予想: {isQwen?'API料金なし（ローカル処理）':p.provider==='mock'?'対象外（外部APIは呼びません）':predictedCost?'約 $'+predictedCost.amount.toFixed(4)+'（同条件の履歴に基づく目安）':'不明（比較できる履歴なし）'} · {p.width}×{p.height} · {p.format.toUpperCase()} · {p.n}枚</p><div className="inline"><button onClick={()=>setPromptOpen(false)}>戻る</button><button className="primary" disabled={busy||!registrationReady||!!qwenProblem(p,target)||refs.length>referenceLimit(p)||['unconfirmed','unsaved'].includes(pending?.state)} onClick={execute}>この指示文で実行</button></div></section></div>:null}
  {settingsOpen?<div className="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="設定" className="modal"><h2>設定</h2><button onClick={()=>act(async()=>{const r=await api('connection-check',{});window.alert(r.message+'\n'+Object.entries(r.models).map(([model,available])=>model+': '+(available?'一覧にあり':'一覧にありません')).join('\n'));})}>実APIの接続を確認（生成なし）</button><label className="field">接続方式<select value={p.provider} onChange={e=>change('provider',e.target.value)}><option value="mock">モック（外部通信なし）</option><option value="openai">OpenAI API（有料）</option></select></label><p>APIキー: {boot.key_set?'ローカル設定済み。モデルアクセスは未検証。':'未設定。アプリ直下の config.local.json の openai_api_key に保存し、画面を再読み込みしてください。環境変数 OPENAI_API_KEY も使えます。'}</p><label className="field">保存先フォルダー<input value={settings.output} onChange={e=>setSettings({...settings,output:e.target.value})}/></label><label className="field">Atelierの料金制限<select value={settings.limit_mode||'notify'} onChange={e=>setSettings({...settings,limit_mode:e.target.value})}><option value="off">制限なし（記録のみ）</option><option value="notify">通知のみ（標準）</option><option value="stop">上限で停止</option></select></label>{settings.limit_mode!=='off'?<><label className="field">集計期間<select value={settings.budget_period||'day'} onChange={e=>setSettings({...settings,budget_period:e.target.value})}><option value="day">今日（日本時間）</option><option value="month">今月（日本時間）</option><option value="all">累計</option></select></label><label className="field">{settings.limit_mode==='stop'?'停止上限':'通知額'}（USD）<input type="number" min="0" step="0.1" value={settings.budget} onChange={e=>setSettings({...settings,budget:e.target.value})}/></label><small>通知額0は通知なしです。OpenAIのクレジット残高とは連動しません。</small></>:null}{settings.limit_mode==='stop'?<details><summary>停止判定の詳細設定</summary><label className="field">1枚の仮計上額（USD）<input type="number" min="0.01" step="0.01" value={settings.reservation} onChange={e=>setSettings({...settings,reservation:e.target.value})}/></label><p>待機・処理中・料金不明のジョブに仮計上します。過去期間の未精算分も判定に含みます。予想料金ではなく、実料金が上回る場合があります。</p></details>:null}<label><input type="checkbox" checked={settings.live} onChange={e=>setSettings({...settings,live:e.target.checked})}/>実APIの送信を有効にする</label>{isQwen?<p>QwenローカルGPU・API料金なし</p>:<UsagePanel usage={usage} error={usageError} jobs={jobs} p={p}/>}<p>価格表確認日: {boot.capabilities.checked}。料金を算出できない処理は「料金不明」として残します。</p><div className="inline"><button onClick={()=>setSettingsOpen(false)}>閉じる</button><button className="primary" onClick={()=>act(async()=>{const s=await api('settings',settings);setSettings(s);await refreshUsage();setSettingsOpen(false);setMessage('設定を保存しました。');})}>設定を保存</button></div></section></div>:null}
  </>;
 }

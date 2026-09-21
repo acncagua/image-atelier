@@ -1,5 +1,6 @@
 from billing import usage_summary
 import qwen_backend
+from pe_jobs import PEJobs
 import base64
 import io
 import json
@@ -23,12 +24,13 @@ from local_config import api_key
 from upscale_jobs import UpscaleJobs
 from upscale_geometry import plan as upscale_plan
 
-def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None, qwen_runner=None):
+def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None, qwen_runner=None, pe_runner=None):
     store=Store(data_path or ROOT/'data')
     if qwen_runner is not None:store.qwen_runner=Path(qwen_runner)
     token=secrets.token_urlsafe(32)
     worker=Worker(store,mock_gate=mock_gate)
     gpu=UpscaleJobs(store,runner=gpu_runner)
+    pe=PEJobs(store,runner=pe_runner)
     @asynccontextmanager
     async def lifespan(app):
         lock_file=None
@@ -40,14 +42,16 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
             except OSError:
                 lock_file.close()
                 raise RuntimeError('Image Atelierは既に起動しています。二重起動を停止しました。')
+        pe.recover()
         qwen_backend.recover(store)
         try:store.recover()
         except Exception as error:worker.fault(error)
         gpu.recover()
         if run_worker: worker.thread.start()
-        if run_worker: gpu.thread.start()
+        if run_worker: gpu.thread.start();pe.thread.start()
         yield
         worker.stop.set()
+        pe.shutdown()
         gpu.shutdown()
         if run_worker: worker.thread.join()
         if lock_file: lock_file.close()
@@ -56,6 +60,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     app.state.token=token
     app.state.worker=worker
     app.state.gpu=gpu
+    app.state.pe=pe
     app.state.test_asset_fault=False
 
     @app.middleware('http')
@@ -208,6 +213,23 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
 
     @app.post('/api/prompt')
     async def prompt(request:Request): return {'prompt':prompt_for(await body(request))}
+
+    @app.get('/api/pe/config')
+    def pe_config():return pe.config()
+
+    @app.post('/api/pe/config')
+    async def pe_configure(request:Request):return pe.configure(await body(request))
+
+    @app.post('/api/pe/jobs')
+    async def pe_submit(request:Request):
+        if mock_gate is not None and pe_runner is None:raise HTTPException(403,'このテスト環境では補強を実行できません。')
+        return pe.submit(await body(request))
+
+    @app.get('/api/pe/jobs/{ident}')
+    def pe_get(ident:str):return pe.get(ident)
+
+    @app.post('/api/pe/jobs/{ident}/cancel')
+    def pe_cancel(ident:str):return pe.cancel(ident)
 
     @app.get('/api/qwen/config')
     def qwen_config():return qwen_backend.configuration(store)

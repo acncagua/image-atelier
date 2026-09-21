@@ -13,7 +13,7 @@ import uvicorn
 
 folder=Path(__file__).resolve().parents[1]/'.tmp'/'fixes-browser'
 gate=threading.Event()
-app=create_app(folder,True,mock_gate=gate,port=18792,gpu_runner=Path(__file__).parent/'fake_upscale_runner.py',qwen_runner=Path(__file__).parent/'fake_qwen_runner.py')
+app=create_app(folder,True,mock_gate=gate,port=18792,gpu_runner=Path(__file__).parent/'fake_upscale_runner.py',qwen_runner=Path(__file__).parent/'fake_qwen_runner.py',pe_runner=Path(__file__).parent/'fake_pe_runner.py')
 fake_model=folder/'mock-model.pth'
 if not fake_model.exists():fake_model.write_text('normal','utf-8')
 app.state.gpu.configure({'python':sys.executable,'model':str(fake_model.resolve())})
@@ -21,6 +21,8 @@ s=app.state.store
 from qwen_backend import configure
 qwen_model=folder/'mock-qwen';qwen_model.mkdir(exist_ok=True);(qwen_model/'model_index.json').write_text('{}')
 configure(s,{'python':sys.executable,'model':str(qwen_model.resolve())})
+pe_model=folder/'mock-pe';pe_model.mkdir(exist_ok=True);(pe_model/'system_prompt.txt').write_text('test')
+app.state.pe.configure({'python':sys.executable,'model':str(pe_model.resolve())})
 s.set_settings({'output':str(folder/'exports'),'budget':0,'reservation':1,'live':False})
 if not s.jobs():
     im=Image.new('RGB',(1001,777),'#baceda');ImageDraw.Draw(im).rectangle((200,200,500,400),fill='#078b95')

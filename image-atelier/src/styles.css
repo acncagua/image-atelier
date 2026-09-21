@@ -22,3 +22,5 @@
 .usage-panel{padding:10px;background:#eff7f8;border-radius:6px;font-size:12px;margin:10px 0}.usage-panel small{display:block;line-height:1.6}.usage-totals{display:grid;gap:8px;margin:8px 0}.usage-totals b{margin-left:8px}.usage-panel a{font-size:12px}
 
 .qwen-controls{padding:12px;margin:12px 0;border:1px solid #cbdfe2;border-radius:8px;background:#f3fafb}.qwen-controls small{display:block}.qwen-controls .inline input{max-width:140px}
+
+.prompt-enhancer{padding:12px;margin:12px 0;background:#eff7f8;border:1px solid #cbdfe2;border-radius:8px}.prompt-enhancer pre{white-space:pre-wrap;overflow-wrap:anywhere}.prompt-enhancer textarea{min-height:150px}.prompt-enhancer small{display:block}

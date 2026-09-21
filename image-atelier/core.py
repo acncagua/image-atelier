@@ -85,6 +85,7 @@ def canonical_input(p):
                        'points':[[float(x),float(y)] for x,y in r['points']]} for r in result['strokes']]
     if result['model']==qwen_backend.MODEL:
         result.update({k:copy.deepcopy(p.get(k,v)) for k,v in qwen_backend.DEFAULTS.items()})
+        if p.get('pe_job_id'):result['pe_job_id']=safe_id(p['pe_job_id'])
     result['feather']=float(result['feather'])
     return result
 
@@ -266,6 +267,11 @@ class Store:
                 machine=qwen_backend.configuration(self)
                 if not Path(machine['python']).is_file() or not (Path(machine['model'])/'model_index.json').is_file():raise ValueError('Qwen専用Pythonまたはモデルが未設定です。Qwen環境設定を確認してください。')
                 job['local_machine']=machine
+                if p.get('pe_job_id'):
+                    from pe_jobs import read_record
+                    enhancement=read_record(self,p['pe_job_id'])
+                    if enhancement['status']!='completed' or p['mode']!='generate' or p['refs']:raise ValueError('採用できるPE-T2I結果ではありません。')
+                    job['prompt_enhancement']={'id':enhancement['id'],'source_prompt':enhancement['params']['prompt'],'result':enhancement['result'],'model':'Qwen-Image-2.1-PE-T2I'}
             self.db.execute('INSERT INTO jobs VALUES (?,?,?)',(job['id'],digest,json.dumps(job,ensure_ascii=False)))
             self.db.commit()
             return job
