@@ -24,3 +24,6 @@ image-atelier/models/
 **/*.pth
 **/*.pt
 **/*.safetensors
+
+image-atelier/.venv-qwen/
+image-atelier/qwen-test-output/
