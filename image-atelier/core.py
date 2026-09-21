@@ -43,15 +43,18 @@ def validate_size(w, h):
         raise ValueError('未対応の寸法です。各辺16の倍数、比率1:3〜3:1、各辺3840以下、655,360〜8,294,400画素。候補: 1920×1088 / 2048×1152（16:9） / 1024×1024。自動変更はしません。')
 
 def prompt_for(p):
+    new_reference=p.get('model')==qwen_backend.MODEL and p['mode']=='generate' and bool(p.get('refs'))
     lines = ['モード: '+p['mode']]
+    if new_reference:lines.append('参照資料を使った新規作成です。入力画像は編集対象のキャンバスではなく、人物や画風などの特徴を確認する資料です。下記の作成内容に沿った新しい1枚を描いてください。参照画像の背景・構図・ポーズ・文字・レイアウトは自動的に踏襲せず、明示的に指定した場合のみ引き継いでください。維持指定は新しい絵でも保ちたい特徴・条件として扱ってください。')
     index = 1
     if p.get('target') and p['mode'] != 'generate':
         lines.append('画像1: 編集対象。構図・ポーズ・背景・現在の仕上がりの基準。')
         index += 1
     for ref in p.get('refs', []):
-        lines.append(f"画像{index}: {ROLES[ref['role']]}。対象人物: {ref.get('person','指定なし')}")
+        role=({'face':'人物の顔立ち・目鼻の配置・年齢感など、同一人物として描くための顔の特徴','body':'人物の体型・髪型・全身の特徴','style':'新しい絵に用いる色・肌・陰影・線・塗りの質感','outfit':'新しい絵に用いる衣装・小物の形と配色'} if new_reference else ROLES)[ref['role']]
+        lines.append(f"画像{index}: {role}。対象人物: {ref.get('person','指定なし')}")
         index += 1
-    lines.extend(['変更すること:\n'+p.get('change',''), '維持すること:\n'+p.get('keep','')])
+    lines.extend([('作成する内容:\n' if new_reference else '変更すること:\n')+p.get('change',''), '維持すること:\n'+p.get('keep','')])
     if p.get('model')==qwen_backend.MODEL and p['mode']=='inpaint':lines.append(qwen_backend.mask_instruction(p))
     return '\n\n'.join(lines)
 

@@ -23,6 +23,18 @@ class QwenJobs(unittest.TestCase):
         job=self.s.job(job['id']);self.assertEqual(job['status'],'completed');self.assertEqual(job['reserved'],0)
         self.assertEqual(job['outputs'][0]['name'],'Qwen出力');self.assertEqual(job['outputs'][0]['width'],512)
         self.assertIn('Qwen',job['message'])
+    def test_reference_generation_is_not_source_editing(self):
+        from PIL import Image
+        from imaging import png
+        base=self.s.asset(png(Image.new('RGB',(512,512),'green')))
+        p=self.params(target=base['id'],refs=[{'id':self.image['id'],'role':'face','person':'主人公'}],change='庭園で座る',keep='髪色を維持')
+        p['prompt']=prompt_for(p)
+        self.assertIn('参照資料を使った新規作成',p['prompt'])
+        self.assertIn('作成する内容:',p['prompt']);self.assertNotIn('編集対象に合わせる',p['prompt'])
+        job=self.s.submit(p);self.assertEqual(job['params']['input_ids'],[self.image['id']])
+        Worker(self.s).run(job['id'])
+        request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(request['inputs'],[str(self.s.file(self.image['id']))])
     def test_parameters_are_part_of_idempotency(self):
         p=self.params();self.s.submit(p);self.s.submit(p)
         with self.assertRaises(JobConflict):self.s.submit({**p,'qwen_steps':8})
