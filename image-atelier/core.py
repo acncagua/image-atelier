@@ -52,6 +52,7 @@ def prompt_for(p):
         lines.append(f"画像{index}: {ROLES[ref['role']]}。対象人物: {ref.get('person','指定なし')}")
         index += 1
     lines.extend(['変更すること:\n'+p.get('change',''), '維持すること:\n'+p.get('keep','')])
+    if p.get('model')==qwen_backend.MODEL and p['mode']=='inpaint':lines.append(qwen_backend.mask_instruction(p))
     return '\n\n'.join(lines)
 
 class JobConflict(ValueError):
@@ -238,7 +239,9 @@ class Store:
             for ref in p.get('refs',[]):
                 if ref['role'] not in ROLES: raise ValueError('資料の役割が不正です。')
                 self.meta(ref['id']); ids.append(ref['id'])
-            if len(ids)>CAP['max_images']: raise ValueError('画像は編集対象を含め8枚までです（初期版の制限）。')
+            if is_qwen:
+                if len(ids)+(1 if p['mode']=='inpaint' else 0)>10:raise ValueError('Qwenの画像入力は元画像・参照資料・部分修正マスクの合計10枚までです。')
+            elif len(ids)>CAP['max_images']:raise ValueError('画像は編集対象を含め8枚までです（初期版の制限）。')
             p['input_ids']=ids
             for ident in ids:
                 if self.file(ident).stat().st_size>=50_000_000: raise ValueError('変換後の入力PNGが50MBを超えています。')
@@ -246,6 +249,7 @@ class Store:
             if p['mode']=='inpaint':
                 m=self.meta(p['target']); mask=mask_image((m['width'],m['height']),p.get('strokes',[]))
                 if not mask.getbbox(): raise ValueError('変更したい範囲をマスクで塗ってください。')
+                if is_qwen and (p['width'],p['height'])!=(m['width'],m['height']):raise ValueError('Qwen部分修正では出力寸法を元画像と同じにしてください。32の倍数でない元画像は先に余白追加で調整してください。')
             digest=fingerprint(p)
             settings=self.settings()
             reserved=0

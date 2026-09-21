@@ -186,11 +186,19 @@ test('cost forecast excludes mocks, unknown prices and other settings',()=>{
 });
 
 import {QWEN_MODEL,qwenDefaults,qwenProblem} from '../src/qwenOptions.js';
-test('Qwen settings survive draft restore and reject unsupported partial editing',()=>{
+test('Qwen settings survive draft restore and validate partial editing sizes',()=>{
  const defaults={mode:'polish',provider:'mock',model:'gpt-image-2.5-sunburst',quality:'medium',format:'png',width:512,height:512,...qwenDefaults};
  const saved={p:{...defaults,model:QWEN_MODEL,qwen_steps:8,qwen_seed:123},refs:[],strokes:[],redo:[]};
  const result=recoverDraft(saved,defaults).payload.p;
  assert.equal(result.model,QWEN_MODEL);assert.equal(result.qwen_steps,8);assert.equal(result.qwen_seed,123);
- assert.equal(qwenProblem(result),'');assert.ok(qwenProblem({...result,mode:'inpaint'}));
+ assert.equal(qwenProblem(result),'');assert.equal(qwenProblem({...result,mode:'inpaint'}),'');assert.ok(qwenProblem({...result,mode:'inpaint'},{width:1024,height:512}));
  assert.ok(qwenProblem({...result,width:513}));assert.ok(qwenProblem({...result,qwen_stride:512}));
+});
+
+import {referenceLimit} from '../src/qwenOptions.js';
+test('Qwen reference capacities leave slots for source and edit mask',()=>{
+ assert.equal(referenceLimit({model:QWEN_MODEL,mode:'generate'}),10);
+ assert.equal(referenceLimit({model:QWEN_MODEL,mode:'polish'}),9);
+ assert.equal(referenceLimit({model:QWEN_MODEL,mode:'inpaint'}),8);
+ assert.equal(referenceLimit({model:'gpt-image-2.5-sunburst',mode:'inpaint'}),7);
 });

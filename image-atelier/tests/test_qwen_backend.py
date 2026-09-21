@@ -37,7 +37,7 @@ class QwenJobs(unittest.TestCase):
         self.assertEqual(r['prompt'],p['prompt']);self.assertEqual(len(r['inputs']),2)
         self.assertIn('preset\nmanual',r['prompt'])
     def test_invalid_modes_dimensions_and_options_are_rejected(self):
-        for changes in ({'mode':'inpaint'},{'width':513},{'n':2},{'format':'jpeg'},{'qwen_steps':0},{'qwen_stride':512},{'provider':'openai'}):
+        for changes in ({'mode':'upscale'},{'width':513},{'n':2},{'format':'jpeg'},{'qwen_steps':0},{'qwen_stride':512},{'provider':'openai'}):
             with self.assertRaises(ValueError):self.s.submit(self.params(**changes))
     def test_cancel_while_waiting_for_gpu_never_launches(self):
         job=self.s.submit(self.params());worker=Worker(self.s)
@@ -81,5 +81,41 @@ class QwenJobs(unittest.TestCase):
             time.sleep(.1);self.assertEqual(self.manager.get(other['id'])['status'],'queued')
         finally:q.cancel(self.s,job['id']);qthread.join(10);sthread.join(10)
         self.assertFalse(sthread.is_alive());self.assertEqual(self.manager.get(other['id'])['status'],'completed')
+
+    def test_mask_is_last_and_composite_preserves_unpainted_pixels(self):
+        from PIL import Image
+        from imaging import png
+        source=self.s.asset(png(Image.new('RGBA',(512,512),(255,0,0,128))))
+        strokes=[{'width':80,'points':[[256,256]],'erase':False},{'width':16,'points':[[256,256]],'erase':True}]
+        p=self.params(mode='inpaint',target=source['id'],strokes=strokes,composite=True,feather=8,
+                      refs=[{'id':self.image['id'],'role':'outfit','person':'色見本'}])
+        p['prompt']=prompt_for(p);job=self.s.submit(p);Worker(self.s).run(job['id'])
+        result=self.s.job(job['id']);self.assertEqual(result['status'],'completed')
+        request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(len(request['inputs']),3);self.assertIn('画像3は',request['prompt'])
+        with Image.open(request['inputs'][-1]) as mask:
+            self.assertEqual(mask.convert('RGB').getpixel((280,256)),(255,255,255))
+            self.assertEqual(mask.convert('RGB').getpixel((256,256)),(0,0,0))
+        merged=result['outputs'][-1];self.assertEqual(merged['kind'],'composite')
+        with Image.open(self.s.file(merged['id'])) as out:
+            self.assertEqual(out.getpixel((0,0)),(255,0,0,128));self.assertEqual(out.getpixel((256,256)),(255,0,0,128))
+            self.assertNotEqual(out.getpixel((280,256)),(255,0,0,128))
+    def test_reference_limits_include_target_and_mask(self):
+        from PIL import Image
+        from imaging import png
+        source=self.s.asset(png(Image.new('RGB',(512,512),'red')))
+        for mode,count in [('generate',10),('polish',9),('inpaint',8)]:
+            refs=[{'id':source['id'],'role':'style'}]*count
+            p=self.params(mode=mode,target=source['id'],refs=refs,strokes=[{'width':20,'points':[[50,50]]}])
+            job=self.s.submit(p);Worker(self.s).run(job['id'])
+            request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
+            self.assertEqual(len(request['inputs']),10)
+            with self.assertRaisesRegex(ValueError,'合計10枚'):self.s.submit({**p,'id':__import__('uuid').uuid4().hex,'refs':refs+[refs[0]]})
+    def test_blank_mask_and_size_mismatch_are_rejected(self):
+        from PIL import Image
+        from imaging import png
+        source=self.s.asset(png(Image.new('RGB',(512,512))))
+        with self.assertRaisesRegex(ValueError,'マスク'):self.s.submit(self.params(mode='inpaint',target=source['id']))
+        with self.assertRaisesRegex(ValueError,'同じ'):self.s.submit(self.params(mode='inpaint',target=source['id'],width=1024,strokes=[{'width':20,'points':[[50,50]]}]))
 
 if __name__=='__main__':unittest.main()

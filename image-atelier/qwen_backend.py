@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 from PIL import Image
+from imaging import mask_image,png
 from persistence import atomic_write
 from managed_child import launch,reap_tree,tree_exited
 
@@ -13,13 +14,17 @@ DEFAULTS={'qwen_steps':40,'qwen_seed':42,'qwen_offload':'model','qwen_tile':512,
 
 def validate(p):
     if p['provider']!='qwen' or p['model']!=MODEL:raise ValueError('QwenモデルはローカルQwen接続で実行してください。')
-    if p['mode'] not in ('generate','polish'):raise ValueError('Qwenの部分修正は未対応です。新規生成またはブラッシュアップを選んでください。')
+    if p['mode'] not in ('generate','polish','inpaint'):raise ValueError('Qwenのモードが不正です。')
     if p['n']!=1 or p['format']!='png':raise ValueError('Qwenは1枚・PNGで実行してください。')
     if any(type(p[k]) is not int or p[k]<128 or p[k]>2048 or p[k]%32 for k in ('width','height')):raise ValueError('Qwenの寸法は各辺128〜2048px、32の倍数で指定してください。')
     for key,low,high in [('qwen_steps',1,50),('qwen_seed',0,4294967295),('qwen_tile',128,1024)]:
         if type(p[key]) is not int or not low<=p[key]<=high:raise ValueError('Qwenパラメータが範囲外です: '+key)
     if p['qwen_offload'] not in ('model','sequential'):raise ValueError('Qwenのオフロード設定が不正です。')
     if p['qwen_tile']%32 or type(p['qwen_stride']) is not int or not 0<p['qwen_stride']<p['qwen_tile'] or p['qwen_stride']%32:raise ValueError('タイルとstrideは32の倍数、strideはタイル未満にしてください。')
+
+def mask_instruction(p):
+    number=2+len(p.get('refs',[]))
+    return f'[Qwen編集範囲]\n画像1は編集対象の元画像です。画像{number}は画像1と同じ位置・寸法の白黒マスクです。白い部分だけが変更対象で、黒い部分は維持してください。マスクは範囲の指定であり、完成画像にマスクや白黒の塗りを描かないでください。変更指示を白い範囲に適用し、周囲になじませてください。'
 
 def configuration(store):
     root=Path(__file__).resolve().parent;file=store.path/'qwen-settings.json'
@@ -81,6 +86,15 @@ def run(worker,ident):
                      'prompt':p['prompt'],'width':p['width'],'height':p['height'],'steps':p['qwen_steps'],
                      'seed':p['qwen_seed'],'offload':p['qwen_offload'],'vae_tiling':True,
                      'vae_tile_size':p['qwen_tile'],'vae_tile_stride':p['qwen_stride'],'output':str(folder/'result.png')}
+            if p['mode']=='inpaint':
+                source=store.meta(p['target'])
+                mask=mask_image((source['width'],source['height']),p['strokes'])
+                asset=store.asset(png(mask.convert('RGB')),'Qwen編集マスク（白＝変更）',p['target'],'mask',identity=ident+':qwen-mask')
+                request['inputs'].append(str(store.file(asset['id'])))
+                note=mask_instruction(p)
+                if note not in request['prompt']:request['prompt']+='\n\n'+note
+                with store.lock:
+                    job=store.job(ident);job['mask']=asset;job['qwen_input_count']=len(request['inputs']);store.save_job(job)
             atomic_write(folder/'request.json',json.dumps(request,ensure_ascii=False).encode('utf-8'))
             root=Path(__file__).resolve().parent
             env={k:v for k,v in os.environ.items() if not any(x in k.upper() for x in ('API_KEY','TOKEN','SECRET'))}
