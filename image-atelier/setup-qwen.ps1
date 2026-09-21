@@ -17,4 +17,6 @@ $env:HF_HUB_OFFLINE = '1'
 $env:TRANSFORMERS_OFFLINE = '1'
 & $qwenPython qwen_probe.py --model $ModelPath --environment --report '.tmp/qwen/preflight.json'
 if ($LASTEXITCODE -ne 0) { throw 'Qwen preflight failed; see .tmp/qwen/preflight.json.' }
+New-Item -ItemType Directory -Path 'data' -Force | Out-Null
+@{python=$qwenPython;model=(Resolve-Path -LiteralPath $ModelPath).Path} | ConvertTo-Json | Set-Content -LiteralPath 'data/qwen-settings.json' -Encoding utf8
 Write-Host 'Qwen environment ready. No weights loaded and no images generated.'

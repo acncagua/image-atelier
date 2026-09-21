@@ -1,4 +1,5 @@
 from billing import usage_summary
+import qwen_backend
 import base64
 import io
 import json
@@ -22,8 +23,9 @@ from local_config import api_key
 from upscale_jobs import UpscaleJobs
 from upscale_geometry import plan as upscale_plan
 
-def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None):
+def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None, qwen_runner=None):
     store=Store(data_path or ROOT/'data')
+    if qwen_runner is not None:store.qwen_runner=Path(qwen_runner)
     token=secrets.token_urlsafe(32)
     worker=Worker(store,mock_gate=mock_gate)
     gpu=UpscaleJobs(store,runner=gpu_runner)
@@ -38,6 +40,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
             except OSError:
                 lock_file.close()
                 raise RuntimeError('Image Atelierは既に起動しています。二重起動を停止しました。')
+        qwen_backend.recover(store)
         try:store.recover()
         except Exception as error:worker.fault(error)
         gpu.recover()
@@ -206,6 +209,12 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     @app.post('/api/prompt')
     async def prompt(request:Request): return {'prompt':prompt_for(await body(request))}
 
+    @app.get('/api/qwen/config')
+    def qwen_config():return qwen_backend.configuration(store)
+
+    @app.post('/api/qwen/config')
+    async def qwen_configure(request:Request):return qwen_backend.configure(store,await body(request))
+
     @app.get('/api/upscale/config')
     def upscale_config():return gpu.public_config()
 
@@ -238,11 +247,11 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         try: uuid.UUID(p['id'])
         except Exception: raise ValueError('ジョブIDが不正です。')
         if worker.health()['state']=='fault':raise HTTPException(503,'ワーカー障害中です。復旧後に登録を確認してください。')
-        if mock_gate is not None and p.get('provider')!='mock':raise HTTPException(403,'テスト環境はモックのみです。')
+        if mock_gate is not None and p.get('provider')!='mock' and not (p.get('provider')=='qwen' and qwen_runner is not None):raise HTTPException(403,'テスト環境はモックのみです。')
         return store.submit(p)
 
     def expose_job(job):
-        return {**job,'recovery':store.response_file(job['id']) is not None}
+        return {**{k:v for k,v in job.items() if k!='local_machine'},'recovery':store.response_file(job['id']) is not None or (job['params']['provider']=='qwen' and qwen_backend.available(store,job))}
 
     @app.get('/api/jobs')
     def jobs(): return [expose_job(job) for job in store.jobs()]
@@ -266,6 +275,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
 
     @app.post('/api/jobs/{ident}/cancel')
     def cancel(ident:str):
+        if store.job(ident)['params']['provider']=='qwen':return expose_job(qwen_backend.cancel(store,ident))
         job=store.update_queued(ident,{'status':'cancelled','reserved':0,'message':'待機取消'})
         if job is None:raise ValueError('取消できるのは待機中だけです。送信済み処理の課金は取り消せません。')
         return job

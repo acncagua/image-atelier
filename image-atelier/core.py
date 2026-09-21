@@ -1,4 +1,5 @@
 from billing import usage_summary
+import qwen_backend
 import copy
 import base64
 import hashlib
@@ -81,6 +82,8 @@ def canonical_input(p):
     result['refs']=[{'id':r['id'],'role':r['role'],'person':r.get('person','')} for r in result['refs']]
     result['strokes']=[{'width':float(r['width']),'erase':bool(r.get('erase',False)),
                        'points':[[float(x),float(y)] for x,y in r['points']]} for r in result['strokes']]
+    if result['model']==qwen_backend.MODEL:
+        result.update({k:copy.deepcopy(p.get(k,v)) for k,v in qwen_backend.DEFAULTS.items()})
     result['feather']=float(result['feather'])
     return result
 
@@ -94,6 +97,7 @@ class Store:
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path/'assets').mkdir(exist_ok=True)
         self.lock = threading.RLock()
+        self.gpu_execution = threading.RLock()
         self.asset_lock = threading.RLock()
         self.db = sqlite3.connect(self.path/'history.sqlite3', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
@@ -214,10 +218,12 @@ class Store:
                 if fingerprint(job['params'])!=fingerprint(p):
                     raise JobConflict('同じジョブIDで異なる入力は登録できません。新しく実行する場合は新しいIDが必要です。')
                 return job
-            validate_size(p['width'],p['height'])
-            if p['model'] not in CAP['models'] or p['quality'] not in CAP['models'][p['model']]['qualities']:
+            is_qwen=p['model']==qwen_backend.MODEL or p['provider']=='qwen'
+            if is_qwen:qwen_backend.validate(p)
+            else:validate_size(p['width'],p['height'])
+            if not is_qwen and (p['model'] not in CAP['models'] or p['quality'] not in CAP['models'][p['model']]['qualities']):
                 raise ValueError('未対応モデル・品質です。別モデルへの自動切替はしません。')
-            if p['mode'] not in ('generate','polish','inpaint') or p['provider'] not in ('mock','openai'):
+            if p['mode'] not in ('generate','polish','inpaint') or p['provider'] not in ('mock','openai','qwen'):
                 raise ValueError('モード・接続方式が不正です。')
             if type(p.get('n',1)) is not int or not 1<=p.get('n',1)<=4 or p.get('format','png') not in ('png','jpeg','webp'):
                 raise ValueError('生成枚数は1〜4枚、出力形式はPNG・JPEG・WebPから選んでください。')
@@ -252,6 +258,10 @@ class Store:
                     if reserved<=0 or accounted+reserved>settings['budget']:
                         raise ValueError('Atelierで設定した利用上限に達するため登録できません。設定の制限方法・金額を確認してください。OpenAIの残高不足ではありません。')
             job={'id':p['id'],'fingerprint':digest,'params':p,'status':'queued','created':datetime.now(timezone.utc).isoformat(),'reserved':reserved,'estimate':None,'message':'待機中','outputs':[]}
+            if is_qwen:
+                machine=qwen_backend.configuration(self)
+                if not Path(machine['python']).is_file() or not (Path(machine['model'])/'model_index.json').is_file():raise ValueError('Qwen専用Pythonまたはモデルが未設定です。Qwen環境設定を確認してください。')
+                job['local_machine']=machine
             self.db.execute('INSERT INTO jobs VALUES (?,?,?)',(job['id'],digest,json.dumps(job,ensure_ascii=False)))
             self.db.commit()
             return job

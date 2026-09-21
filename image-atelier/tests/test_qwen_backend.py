@@ -1,0 +1,85 @@
+import json
+import sys
+import threading
+import time
+import unittest
+from unittest.mock import patch
+import test_upscale as fixtures
+from core import Worker,JobConflict,ROOT,canonical_input,prompt_for
+import qwen_backend as q
+
+class QwenJobs(unittest.TestCase):
+    setUp=fixtures.Jobs.setUp
+    tearDown=fixtures.Jobs.tearDown
+    def params(self,**changes):
+        import uuid
+        folder=self.path/'qwen';folder.mkdir(exist_ok=True);(folder/'model_index.json').write_text('{}')
+        q.configure(self.s,{'python':sys.executable,'model':str(folder)})
+        self.s.qwen_runner=ROOT/'tests/fake_qwen_runner.py'
+        return {'id':str(uuid.uuid4()),'model':q.MODEL,'provider':'qwen','mode':'generate','width':512,'height':512,'n':1,'format':'png','prompt':'変更すること: 青色の背景','refs':[],**q.DEFAULTS,**changes}
+    def test_generate_keeps_history_without_api_or_budget(self):
+        p=self.params();job=self.s.submit(p)
+        with patch('core.real_request',side_effect=AssertionError('no API')),patch('core.mock_request',side_effect=AssertionError('not API mock')):Worker(self.s).run(job['id'])
+        job=self.s.job(job['id']);self.assertEqual(job['status'],'completed');self.assertEqual(job['reserved'],0)
+        self.assertEqual(job['outputs'][0]['name'],'Qwen出力');self.assertEqual(job['outputs'][0]['width'],512)
+        self.assertIn('Qwen',job['message'])
+    def test_parameters_are_part_of_idempotency(self):
+        p=self.params();self.s.submit(p);self.s.submit(p)
+        with self.assertRaises(JobConflict):self.s.submit({**p,'qwen_steps':8})
+        self.assertEqual(len(self.s.jobs()),1)
+    def test_api_canonical_contract_is_unchanged(self):
+        p={'model':'gpt-image-2.5-sunburst','qwen_steps':7}
+        self.assertNotIn('qwen_steps',canonical_input(p))
+    def test_edit_preserves_prompt_and_reference_order(self):
+        p=self.params(mode='polish',target=self.image['id'],refs=[{'id':self.image['id'],'role':'style','person':'A'}],change='preset\nmanual',keep='顔を維持')
+        p['prompt']=prompt_for(p);job=self.s.submit(p);Worker(self.s).run(job['id'])
+        r=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(r['prompt'],p['prompt']);self.assertEqual(len(r['inputs']),2)
+        self.assertIn('preset\nmanual',r['prompt'])
+    def test_invalid_modes_dimensions_and_options_are_rejected(self):
+        for changes in ({'mode':'inpaint'},{'width':513},{'n':2},{'format':'jpeg'},{'qwen_steps':0},{'qwen_stride':512},{'provider':'openai'}):
+            with self.assertRaises(ValueError):self.s.submit(self.params(**changes))
+    def test_cancel_while_waiting_for_gpu_never_launches(self):
+        job=self.s.submit(self.params());worker=Worker(self.s)
+        with self.s.gpu_execution:
+            thread=threading.Thread(target=worker.run,args=(job['id'],));thread.start();time.sleep(.05)
+            q.cancel(self.s,job['id'])
+        thread.join(5);self.assertFalse(thread.is_alive());self.assertEqual(self.s.job(job['id'])['status'],'cancelled')
+        self.assertFalse((q.directory(self.s,job['id'])/'request.json').exists())
+    def test_running_cancel_terminates_owned_child(self):
+        job=self.s.submit(self.params());(self.path/'qwen/wait').write_text('wait');worker=Worker(self.s)
+        thread=threading.Thread(target=worker.run,args=(job['id'],));thread.start()
+        try:
+            deadline=time.time()+5
+            while self.s.job(job['id'])['status']=='queued' and time.time()<deadline:time.sleep(.02)
+            q.cancel(self.s,job['id'])
+        finally:thread.join(10)
+        self.assertFalse(thread.is_alive());self.assertEqual(self.s.job(job['id'])['status'],'cancelled')
+    def test_saved_output_reprocess_does_not_infer(self):
+        job=self.s.submit(self.params());worker=Worker(self.s)
+        with patch.object(self.s,'export',side_effect=OSError('full')):worker.run(job['id'])
+        self.assertEqual(self.s.job(job['id'])['status'],'local_error')
+        with patch('qwen_backend.launch',side_effect=AssertionError('no inference')):worker.reprocess(job['id'])
+        self.assertEqual(self.s.job(job['id'])['status'],'completed')
+    def test_restart_recovers_complete_png_without_a_completed_marker(self):
+        from PIL import Image
+        from imaging import png
+        job=self.s.submit(self.params());folder=q.directory(self.s,job['id']);folder.mkdir(parents=True)
+        (folder/'result.png').write_bytes(png(Image.new('RGBA',(512,512),'blue')))
+        (folder/'status.json').write_text('{"state":"saving"}')
+        job['status']='sending';self.s.save_job(job);q.recover(self.s)
+        self.assertEqual(self.s.job(job['id'])['status'],'local_error')
+        with patch('qwen_backend.launch',side_effect=AssertionError('no inference')):Worker(self.s).reprocess(job['id'])
+        self.assertEqual(self.s.job(job['id'])['status'],'completed')
+    def test_swinir_waits_for_qwen_on_shared_gpu(self):
+        job=self.s.submit(self.params());(self.path/'qwen/wait').write_text('wait')
+        worker=Worker(self.s);qthread=threading.Thread(target=worker.run,args=(job['id'],));qthread.start()
+        deadline=time.time()+5
+        while self.s.job(job['id'])['status']=='queued' and time.time()<deadline:time.sleep(.02)
+        other=self.manager.submit(fixtures.Jobs.body(self));sthread=threading.Thread(target=self.manager.run,args=(other['id'],));sthread.start()
+        try:
+            time.sleep(.1);self.assertEqual(self.manager.get(other['id'])['status'],'queued')
+        finally:q.cancel(self.s,job['id']);qthread.join(10);sthread.join(10)
+        self.assertFalse(sthread.is_alive());self.assertEqual(self.manager.get(other['id'])['status'],'completed')
+
+if __name__=='__main__':unittest.main()

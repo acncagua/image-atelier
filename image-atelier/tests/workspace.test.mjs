@@ -184,3 +184,13 @@ test('cost forecast excludes mocks, unknown prices and other settings',()=>{
  assert.equal(forecastCost([{...j,estimate:null}],p),null);
  assert.deepEqual(forecastCost([j,{...j,estimate:10,params:{...j.params,provider:'mock'}},{...j,estimate:5,params:{...j.params,width:2048}}],p),{amount:.08,samples:1});
 });
+
+import {QWEN_MODEL,qwenDefaults,qwenProblem} from '../src/qwenOptions.js';
+test('Qwen settings survive draft restore and reject unsupported partial editing',()=>{
+ const defaults={mode:'polish',provider:'mock',model:'gpt-image-2.5-sunburst',quality:'medium',format:'png',width:512,height:512,...qwenDefaults};
+ const saved={p:{...defaults,model:QWEN_MODEL,qwen_steps:8,qwen_seed:123},refs:[],strokes:[],redo:[]};
+ const result=recoverDraft(saved,defaults).payload.p;
+ assert.equal(result.model,QWEN_MODEL);assert.equal(result.qwen_steps,8);assert.equal(result.qwen_seed,123);
+ assert.equal(qwenProblem(result),'');assert.ok(qwenProblem({...result,mode:'inpaint'}));
+ assert.ok(qwenProblem({...result,width:513}));assert.ok(qwenProblem({...result,qwen_stride:512}));
+});
