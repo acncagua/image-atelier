@@ -220,3 +220,24 @@ test('old preset-first drafts restore with manual instruction first',()=>{
   assert.equal(composeInstructions('change',restored),editor.extra+'\n'+instructionPresets.change[0][2]);
  }
 });
+import {enhancementState} from '../src/enhancementState.js';
+test('PE restore is offered only for the currently adopted result',()=>{
+ const job={id:'pe1',status:'completed',params:{prompt:'original'},result:{rewritten_prompt:'enhanced'}};
+ assert.deepEqual(enhancementState(job,'original',true,null),{active:false,canApply:true,previous:false});
+ assert.deepEqual(enhancementState(job,'enhanced',true,'pe1'),{active:true,canApply:false,previous:false});
+ for(const [text,matching,id] of [['new prompt',true,'pe1'],['enhanced',false,'pe1'],['enhanced',true,null],['original',false,null]]){
+  assert.deepEqual(enhancementState(job,text,matching,id),{active:false,canApply:false,previous:true});
+ }
+});
+
+import {enhancementVisible} from '../src/enhancementState.js';
+test('dismissed PE results stay hidden even when old registration is polled again',()=>{
+ const job={id:'pe1',status:'completed',params:{prompt:'source'},result:{rewritten_prompt:'enhanced'}};
+ assert.equal(enhancementVisible(job,'source',true,null,'pe1'),true);
+ assert.equal(enhancementVisible(job,'enhanced',true,'pe1','pe1'),true);
+ assert.equal(enhancementVisible(job,'new input',true,null,null),false);
+ assert.equal(enhancementVisible(job,'source',true,null,null),false);
+ assert.equal(enhancementVisible(job,'enhanced',false,null,null),false);
+ // Explicit history restore is the only way to show the adopted result again.
+ assert.equal(enhancementVisible(job,'enhanced',true,'pe1','pe1'),true);
+});
