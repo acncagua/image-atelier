@@ -45,7 +45,8 @@ def inspect(c):
     missing=[name for name in REQUIRED if name not in info]
     def choices(node,key):
         return info.get(node,{}).get('input',{}).get('required',{}).get(key,[[]])[0]
-    return {'missing':missing,'diffusion':choices('UNETLoader','unet_name'),
+    standard=choices('UNETLoader','unet_name');gguf=choices('UnetLoaderGGUF','unet_name')
+    return {'missing':missing,'gguf_available':'UnetLoaderGGUF' in info,'gguf_diffusion':gguf,'standard_diffusion':standard,'diffusion':list(dict.fromkeys([*standard,*gguf])),
             'text_encoder':choices('CLIPLoader','clip_name'),'vae':choices('VAELoader','vae_name')}
 
 def check(store):
@@ -56,13 +57,16 @@ def check(store):
 def validate_models(c,config):
     available=inspect(c)
     if available['missing']:raise ValueError('Qwen 2.1対応ComfyUIが必要です。不足ノード: '+', '.join(available['missing']))
+    is_gguf=config['diffusion'].lower().endswith('.gguf')
+    if is_gguf and not available['gguf_available']:raise ValueError('GGUFにはComfyUI-GGUFのUnetLoaderGGUFが必要です。導入後にComfyUIを再起動してください。')
+    if config['diffusion'] not in available['gguf_diffusion' if is_gguf else 'standard_diffusion']:raise ValueError('選択形式のローダーにモデルがありません。モデル一覧を再取得してください。')
     for name in ('diffusion','text_encoder','vae'):
         if config[name] not in available[name]:raise ValueError('ComfyUIにモデルがありません: '+name)
 
 def workflow(p,config,seed,images,ident):
     def node(kind,**inputs):return {'class_type':kind,'inputs':inputs}
     graph={
-        '1':node('UNETLoader',unet_name=config['diffusion'],weight_dtype='default'),
+        '1':node('UnetLoaderGGUF',unet_name=config['diffusion']) if config['diffusion'].lower().endswith('.gguf') else node('UNETLoader',unet_name=config['diffusion'],weight_dtype='default'),
         '2':node('CLIPLoader',clip_name=config['text_encoder'],type='qwen_image',device='default'),
         '3':node('VAELoader',vae_name=config['vae']),
         '4':node('TextEncodeQwenImage21',clip=['2',0],prompt=p['prompt'],negative_prompt=p.get('qwen_negative',''),resolution=1024),

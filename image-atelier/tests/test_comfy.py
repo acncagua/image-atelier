@@ -100,3 +100,20 @@ class Comfy(unittest.TestCase):
         job={'comfy_prompt_id':'id'}
         with self.assertRaises(RuntimeError):
             c.collect(self.s,job,None,{'id':{'status':{'completed':False,'status_str':'error'}}})
+
+    def test_gguf_uses_dedicated_loader_without_standard_options(self):
+        config={**self.config,'diffusion':'qwen-image-2.1-Q8_0.gguf'}
+        graph=c.workflow(self.params(),config,42,[],'job')
+        self.assertEqual(graph['1'],{'class_type':'UnetLoaderGGUF','inputs':{'unet_name':config['diffusion']}})
+        with self.client(config) as client:
+            with self.assertRaisesRegex(ValueError,'UnetLoaderGGUF'):c.validate_models(client,config)
+        def handler(request):
+            response=self.handler(request)
+            if request.url.path=='/object_info':
+                info=response.json();info['UnetLoaderGGUF']={'input':{'required':{'unet_name':[[config['diffusion']]]}}}
+                return httpx.Response(200,json=info)
+            return response
+        with httpx.Client(base_url=config['url'],transport=httpx.MockTransport(handler)) as client:
+            available=c.inspect(client)
+            self.assertIn(config['diffusion'],available['diffusion'])
+            c.validate_models(client,config)

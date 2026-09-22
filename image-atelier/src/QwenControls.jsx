@@ -18,7 +18,7 @@ export default function QwenControls({p,change,target}){
  <label className="field">ComfyUI URL<input aria-label="ComfyUI URL" value={config.url} onChange={e=>setConfig({...config,url:e.target.value})}/></label>
  <button disabled={busy} onClick={()=>perform(async()=>{await api('qwen/config',config);const result=await api('comfy/check',{});setModels(result);setMessage(result.missing.length?'不足ノード: '+result.missing.join(', '):'接続成功。Qwen-Image-2.1用のモデルを選択して保存してください。');})}>接続確認・モデル一覧を取得</button>
  {Object.entries({diffusion:'画像生成モデル',text_encoder:'テキストエンコーダー',vae:'VAE'}).map(([key,label])=><label className="field" key={key}>{label}<select aria-label={label} value={config[key]} onChange={e=>setConfig({...config,[key]:e.target.value})}><option value="">選択してください</option>{[...new Set([config[key],...(models?.[key]||[])])].filter(Boolean).map(v=><option key={v} value={v}>{v}</option>)}</select></label>)}
- <button disabled={busy} onClick={()=>perform(async()=>{await api('qwen/config',config);setMessage('ComfyUI設定を保存しました。次のジョブから適用します。');})}>ComfyUI設定を保存</button>
+ <button disabled={busy} onClick={()=>perform(async()=>{await api('qwen/config',config);setMessage('ComfyUI設定を保存しました。次のジョブから適用します。');})}>ComfyUI設定を保存</button><small>{config.diffusion?.toLowerCase().endsWith('.gguf')?'GGUF専用ローダーを使用します。':'標準safetensorsローダーを使用します。'}</small>
  <button disabled={busy} onClick={()=>perform(async()=>{const results=await api('comfy/recover',{});setMessage(results.length?results.map(r=>r.id+': '+(r.recovered?'照合完了':r.message)).join(' / '):'未確認のジョブはありません。');})}>中断ジョブを照合・残処理を取消</button>
  </>:null}</details>{message?<p role="status">{message}</p>:null}</section>;
 }
