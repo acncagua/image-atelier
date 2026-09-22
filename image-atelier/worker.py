@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 import httpx
 import core
+import qwen_backend
 from persistence import atomic_write
 from imaging import normalize, png, mask_image, api_mask, composite
 
@@ -71,6 +72,9 @@ class Worker:
                 if job['status']!='queued':return
                 self.current=ident
                 p=job['params']
+                if p['provider']=='qwen':
+                    qwen_backend.run(self,ident)
+                    return
                 # All local preparation happens before the durable sending marker.
                 try:
                     if p['provider']=='openai':
@@ -147,6 +151,8 @@ class Worker:
         s=self.store;job=s.job(ident)
         if job['status']=='queued':raise ValueError('待機中のジョブは再処理できません。')
         file=s.response_file(ident)
+        if not file and job['params']['provider']=='qwen':
+            qwen_backend.collect(s,job);file=s.response_file(ident)
         if not file:raise ValueError('保存済みの応答がありません。')
         p=job['params'];job['recovery']=True;job['phase']='response_saved'
         try:
@@ -176,7 +182,7 @@ class Worker:
                 if legacy and 'raw' not in record and index<len(raw_old):record['raw']=raw_old[index]
                 if 'raw' not in record:
                     content=base64.b64decode(encoded,validate=True)
-                    record['raw']=s.asset(content,'API生出力' if p['provider']=='openai' else 'モック出力',p.get('target'),'raw',identity=f'{ident}:raw:{index}')
+                    record['raw']=s.asset(content,'Qwen出力' if p['provider']=='qwen' else 'API生出力' if p['provider']=='openai' else 'モック出力',p.get('target'),'raw',identity=f'{ident}:raw:{index}')
                 result=record['raw'];s.file(result['id'])
                 outputs.append(result)
                 if (result['width'],result['height'])!=(p['width'],p['height']):warnings.append('要求寸法と実寸法が異なります。')
@@ -208,7 +214,7 @@ class Worker:
             except OSError:errors.append('保存先に書き込めません。PNGダウンロードで回収し、再処理で書き出しを再試行できます。')
         job.update(saved_paths=list(exported.values()),status='local_error' if errors else 'completed',
                    phase='local_processing_failed' if errors else 'exported',local_errors=errors,
-                   message=' / '.join(errors+warnings) or ('完了' if p['provider']=='openai' else 'モック処理が完了しました。画質評価には使えません。'))
+                   message=' / '.join(errors+warnings) or ('Qwenローカル処理が完了しました。' if p['provider']=='qwen' else '完了' if p['provider']=='openai' else 'モック処理が完了しました。画質評価には使えません。'))
         if len(items)!=p.get('n',1):job['message']+=' / 要求枚数と取得枚数が異なります。'
         if exported:job['saved_path']=list(exported.values())[-1]
         if not self.persist(job):raise OSError('State persistence failed')

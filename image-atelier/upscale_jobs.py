@@ -143,6 +143,12 @@ class UpscaleJobs:
             except Exception as error:self.error=type(error).__name__+'：ローカルジョブの保存先を確認し、アプリを再起動してください。'
 
     def run(self,ident):
+        with self.store.gpu_execution:
+            if not self.stop.is_set():
+                self.store.qwen_session.unload()
+                self._run(ident)
+
+    def _run(self,ident):
         with self.lock:
             job=self.get(ident)
             if job['status']!='queued':return

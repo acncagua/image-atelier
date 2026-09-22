@@ -1,4 +1,6 @@
 from billing import usage_summary
+import qwen_backend
+import qwen_session
 import copy
 import base64
 import hashlib
@@ -42,15 +44,20 @@ def validate_size(w, h):
         raise ValueError('未対応の寸法です。各辺16の倍数、比率1:3〜3:1、各辺3840以下、655,360〜8,294,400画素。候補: 1920×1088 / 2048×1152（16:9） / 1024×1024。自動変更はしません。')
 
 def prompt_for(p):
+    if p.get("model")==qwen_backend.MODEL:return p.get("change", "")
+    new_reference=p.get('model')==qwen_backend.MODEL and p['mode']=='generate' and bool(p.get('refs'))
     lines = ['モード: '+p['mode']]
+    if new_reference:lines.append('参照資料を使った新規作成です。入力画像は編集対象のキャンバスではなく、人物や画風などの特徴を確認する資料です。下記の作成内容に沿った新しい1枚を描いてください。参照画像の背景・構図・ポーズ・文字・レイアウトは自動的に踏襲せず、明示的に指定した場合のみ引き継いでください。維持指定は新しい絵でも保ちたい特徴・条件として扱ってください。')
     index = 1
     if p.get('target') and p['mode'] != 'generate':
         lines.append('画像1: 編集対象。構図・ポーズ・背景・現在の仕上がりの基準。')
         index += 1
     for ref in p.get('refs', []):
-        lines.append(f"画像{index}: {ROLES[ref['role']]}。対象人物: {ref.get('person','指定なし')}")
+        role=({'face':'人物の顔立ち・目鼻の配置・年齢感など、同一人物として描くための顔の特徴','body':'人物の体型・髪型・全身の特徴','style':'新しい絵に用いる色・肌・陰影・線・塗りの質感','outfit':'新しい絵に用いる衣装・小物の形と配色'} if new_reference else ROLES)[ref['role']]
+        lines.append(f"画像{index}: {role}。対象人物: {ref.get('person','指定なし')}")
         index += 1
-    lines.extend(['変更すること:\n'+p.get('change',''), '維持すること:\n'+p.get('keep','')])
+    lines.extend([('作成する内容:\n' if new_reference else '変更すること:\n')+p.get('change',''), '維持すること:\n'+p.get('keep','')])
+    if p.get('model')==qwen_backend.MODEL and p['mode']=='inpaint':lines.append(qwen_backend.mask_instruction(p))
     return '\n\n'.join(lines)
 
 class JobConflict(ValueError):
@@ -81,6 +88,9 @@ def canonical_input(p):
     result['refs']=[{'id':r['id'],'role':r['role'],'person':r.get('person','')} for r in result['refs']]
     result['strokes']=[{'width':float(r['width']),'erase':bool(r.get('erase',False)),
                        'points':[[float(x),float(y)] for x,y in r['points']]} for r in result['strokes']]
+    if result['model']==qwen_backend.MODEL:
+        result.update({k:copy.deepcopy(p.get(k,v)) for k,v in qwen_backend.DEFAULTS.items()})
+        if p.get('pe_job_id'):result['pe_job_id']=safe_id(p['pe_job_id'])
     result['feather']=float(result['feather'])
     return result
 
@@ -94,6 +104,8 @@ class Store:
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path/'assets').mkdir(exist_ok=True)
         self.lock = threading.RLock()
+        self.gpu_execution = threading.RLock()
+        self.qwen_session = qwen_session.Session(self)
         self.asset_lock = threading.RLock()
         self.db = sqlite3.connect(self.path/'history.sqlite3', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
@@ -214,10 +226,12 @@ class Store:
                 if fingerprint(job['params'])!=fingerprint(p):
                     raise JobConflict('同じジョブIDで異なる入力は登録できません。新しく実行する場合は新しいIDが必要です。')
                 return job
-            validate_size(p['width'],p['height'])
-            if p['model'] not in CAP['models'] or p['quality'] not in CAP['models'][p['model']]['qualities']:
+            is_qwen=p['model']==qwen_backend.MODEL or p['provider']=='qwen'
+            if is_qwen:qwen_backend.validate(p)
+            else:validate_size(p['width'],p['height'])
+            if not is_qwen and (p['model'] not in CAP['models'] or p['quality'] not in CAP['models'][p['model']]['qualities']):
                 raise ValueError('未対応モデル・品質です。別モデルへの自動切替はしません。')
-            if p['mode'] not in ('generate','polish','inpaint') or p['provider'] not in ('mock','openai'):
+            if p['mode'] not in ('generate','polish','inpaint') or p['provider'] not in ('mock','openai','qwen'):
                 raise ValueError('モード・接続方式が不正です。')
             if type(p.get('n',1)) is not int or not 1<=p.get('n',1)<=4 or p.get('format','png') not in ('png','jpeg','webp'):
                 raise ValueError('生成枚数は1〜4枚、出力形式はPNG・JPEG・WebPから選んでください。')
@@ -232,7 +246,9 @@ class Store:
             for ref in p.get('refs',[]):
                 if ref['role'] not in ROLES: raise ValueError('資料の役割が不正です。')
                 self.meta(ref['id']); ids.append(ref['id'])
-            if len(ids)>CAP['max_images']: raise ValueError('画像は編集対象を含め8枚までです（初期版の制限）。')
+            if is_qwen:
+                if len(ids)+(1 if p['mode']=='inpaint' else 0)>10:raise ValueError('Qwenの画像入力は元画像・参照資料・部分修正マスクの合計10枚までです。')
+            elif len(ids)>CAP['max_images']:raise ValueError('画像は編集対象を含め8枚までです（初期版の制限）。')
             p['input_ids']=ids
             for ident in ids:
                 if self.file(ident).stat().st_size>=50_000_000: raise ValueError('変換後の入力PNGが50MBを超えています。')
@@ -240,6 +256,7 @@ class Store:
             if p['mode']=='inpaint':
                 m=self.meta(p['target']); mask=mask_image((m['width'],m['height']),p.get('strokes',[]))
                 if not mask.getbbox(): raise ValueError('変更したい範囲をマスクで塗ってください。')
+                if is_qwen and (p['width'],p['height'])!=(m['width'],m['height']):raise ValueError('Qwen部分修正では出力寸法を元画像と同じにしてください。32の倍数でない元画像は先に余白追加で調整してください。')
             digest=fingerprint(p)
             settings=self.settings()
             reserved=0
@@ -252,6 +269,17 @@ class Store:
                     if reserved<=0 or accounted+reserved>settings['budget']:
                         raise ValueError('Atelierで設定した利用上限に達するため登録できません。設定の制限方法・金額を確認してください。OpenAIの残高不足ではありません。')
             job={'id':p['id'],'fingerprint':digest,'params':p,'status':'queued','created':datetime.now(timezone.utc).isoformat(),'reserved':reserved,'estimate':None,'message':'待機中','outputs':[]}
+            if is_qwen:
+                machine=qwen_backend.configuration(self)
+                if not Path(machine['python']).is_file() or not (Path(machine['model'])/'model_index.json').is_file():raise ValueError('Qwen専用Pythonまたはモデルが未設定です。Qwen環境設定を確認してください。')
+                job['local_machine']=machine
+                if p.get('pe_job_id'):
+                    from pe_jobs import read_record,input_context
+                    enhancement=read_record(self,p['pe_job_id'])
+                    if enhancement['status']!='completed':raise ValueError('採用できる補強結果ではありません。')
+                    context=enhancement['params'].get('context')
+                    if (context is not None and context!=input_context(p)) or (context is None and (p['mode']!='generate' or p['refs'])):raise ValueError('補強時と画像・編集範囲が異なります。再補強してください。')
+                    job['prompt_enhancement']={'id':enhancement['id'],'source_prompt':enhancement['params']['prompt'],'result':enhancement['result'],'model':'Qwen-Image-2.1-PE-I2I' if context is not None else 'Qwen-Image-2.1-PE-T2I'}
             self.db.execute('INSERT INTO jobs VALUES (?,?,?)',(job['id'],digest,json.dumps(job,ensure_ascii=False)))
             self.db.commit()
             return job

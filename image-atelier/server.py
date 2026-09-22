@@ -1,4 +1,6 @@
 from billing import usage_summary
+import qwen_backend
+from pe_jobs import PEJobs
 import base64
 import io
 import json
@@ -22,11 +24,13 @@ from local_config import api_key
 from upscale_jobs import UpscaleJobs
 from upscale_geometry import plan as upscale_plan
 
-def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None):
+def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None, qwen_runner=None, pe_runner=None):
     store=Store(data_path or ROOT/'data')
+    if qwen_runner is not None:store.qwen_runner=Path(qwen_runner)
     token=secrets.token_urlsafe(32)
     worker=Worker(store,mock_gate=mock_gate)
     gpu=UpscaleJobs(store,runner=gpu_runner)
+    pe=PEJobs(store,runner=pe_runner)
     @asynccontextmanager
     async def lifespan(app):
         lock_file=None
@@ -38,21 +42,26 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
             except OSError:
                 lock_file.close()
                 raise RuntimeError('Image Atelierは既に起動しています。二重起動を停止しました。')
+        pe.recover()
+        qwen_backend.recover(store)
         try:store.recover()
         except Exception as error:worker.fault(error)
         gpu.recover()
         if run_worker: worker.thread.start()
-        if run_worker: gpu.thread.start()
+        if run_worker: gpu.thread.start();pe.thread.start()
         yield
         worker.stop.set()
+        pe.shutdown()
         gpu.shutdown()
         if run_worker: worker.thread.join()
+        store.qwen_session.unload()
         if lock_file: lock_file.close()
     app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
     app.state.store=store
     app.state.token=token
     app.state.worker=worker
     app.state.gpu=gpu
+    app.state.pe=pe
     app.state.test_asset_fault=False
 
     @app.middleware('http')
@@ -206,6 +215,45 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     @app.post('/api/prompt')
     async def prompt(request:Request): return {'prompt':prompt_for(await body(request))}
 
+    @app.get('/api/pe/config')
+    def pe_config():return pe.config()
+
+    @app.post('/api/pe/config')
+    async def pe_configure(request:Request):return pe.configure(await body(request))
+
+    @app.post('/api/pe/jobs')
+    async def pe_submit(request:Request):
+        if mock_gate is not None and pe_runner is None:raise HTTPException(403,'このテスト環境では補強を実行できません。')
+        return pe.submit(await body(request))
+
+    @app.get('/api/pe/jobs/{ident}')
+    def pe_get(ident:str):return pe.get(ident)
+
+    @app.post('/api/pe/jobs/{ident}/cancel')
+    def pe_cancel(ident:str):return pe.cancel(ident)
+
+    @app.post('/api/qwen/session')
+    async def qwen_selection(request:Request):
+        p=await body(request)
+        selected=p.get('selected')
+        if type(selected) is not bool:raise ValueError('selected must be boolean')
+        store.qwen_session.selected=False
+        # Never interrupt the current job because the user changes the dropdown.
+        # The invocation releases its process on completion if no longer selected.
+        def release_idle():
+            if store.gpu_execution.acquire(blocking=False):
+                try:
+                    if not store.qwen_session.selected:store.qwen_session.unload()
+                finally:store.gpu_execution.release()
+        await run_in_threadpool(release_idle)
+        return {'selected':False}
+
+    @app.get('/api/qwen/config')
+    def qwen_config():return qwen_backend.configuration(store)
+
+    @app.post('/api/qwen/config')
+    async def qwen_configure(request:Request):return qwen_backend.configure(store,await body(request))
+
     @app.get('/api/upscale/config')
     def upscale_config():return gpu.public_config()
 
@@ -238,11 +286,11 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         try: uuid.UUID(p['id'])
         except Exception: raise ValueError('ジョブIDが不正です。')
         if worker.health()['state']=='fault':raise HTTPException(503,'ワーカー障害中です。復旧後に登録を確認してください。')
-        if mock_gate is not None and p.get('provider')!='mock':raise HTTPException(403,'テスト環境はモックのみです。')
+        if mock_gate is not None and p.get('provider')!='mock' and not (p.get('provider')=='qwen' and qwen_runner is not None):raise HTTPException(403,'テスト環境はモックのみです。')
         return store.submit(p)
 
     def expose_job(job):
-        return {**job,'recovery':store.response_file(job['id']) is not None}
+        return {**{k:v for k,v in job.items() if k!='local_machine'},'recovery':store.response_file(job['id']) is not None or (job['params']['provider']=='qwen' and qwen_backend.available(store,job))}
 
     @app.get('/api/jobs')
     def jobs(): return [expose_job(job) for job in store.jobs()]
@@ -266,6 +314,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
 
     @app.post('/api/jobs/{ident}/cancel')
     def cancel(ident:str):
+        if store.job(ident)['params']['provider']=='qwen':return expose_job(qwen_backend.cancel(store,ident))
         job=store.update_queued(ident,{'status':'cancelled','reserved':0,'message':'待機取消'})
         if job is None:raise ValueError('取消できるのは待機中だけです。送信済み処理の課金は取り消せません。')
         return job

@@ -134,7 +134,7 @@ import {instructionPresets,composeInstructions,parseInstructions,restoreInstruct
 test('instruction presets compose selected templates and extra text without duplication',()=>{
  const e={selected:['polish','expression'],values:{expression:'少し困った笑顔'},extra:'文字は読みやすくしてください。'};
  const text=composeInstructions('change',e);
- assert.ok(text.includes('【少し困った笑顔】'));assert.ok(text.endsWith(e.extra));
+ assert.ok(text.includes('【少し困った笑顔】'));assert.ok(text.startsWith(e.extra));
  assert.deepEqual(parseInstructions('change',text),e);
  assert.equal(composeInstructions('change',{...e,selected:[]}),e.extra);
 });
@@ -183,4 +183,40 @@ test('cost forecast excludes mocks, unknown prices and other settings',()=>{
  const j={params:{...p,provider:'openai',n:1},status:'completed',estimate:.04};
  assert.equal(forecastCost([{...j,estimate:null}],p),null);
  assert.deepEqual(forecastCost([j,{...j,estimate:10,params:{...j.params,provider:'mock'}},{...j,estimate:5,params:{...j.params,width:2048}}],p),{amount:.08,samples:1});
+});
+
+import {QWEN_MODEL,qwenDefaults,qwenProblem} from '../src/qwenOptions.js';
+test('Qwen settings survive draft restore and validate partial editing sizes',()=>{
+ const defaults={mode:'polish',provider:'mock',model:'gpt-image-2.5-sunburst',quality:'medium',format:'png',width:512,height:512,...qwenDefaults};
+ const saved={p:{...defaults,model:QWEN_MODEL,qwen_steps:8,qwen_seed:123},refs:[],strokes:[],redo:[]};
+ const result=recoverDraft(saved,defaults).payload.p;
+ assert.equal(result.model,QWEN_MODEL);assert.equal(result.qwen_steps,8);assert.equal(result.qwen_seed,123);
+ assert.equal(qwenProblem(result),'');assert.equal(qwenProblem({...result,mode:'inpaint'}),'');assert.ok(qwenProblem({...result,mode:'inpaint'},{width:1024,height:512}));
+ assert.ok(qwenProblem({...result,width:513}));assert.ok(qwenProblem({...result,qwen_stride:512}));
+});
+
+import {referenceLimit} from '../src/qwenOptions.js';
+test('Qwen reference capacities leave slots for source and edit mask',()=>{
+ assert.equal(referenceLimit({model:QWEN_MODEL,mode:'generate'}),10);
+ assert.equal(referenceLimit({model:QWEN_MODEL,mode:'polish'}),9);
+ assert.equal(referenceLimit({model:QWEN_MODEL,mode:'inpaint'}),8);
+ assert.equal(referenceLimit({model:'gpt-image-2.5-sunburst',mode:'inpaint'}),7);
+});
+
+test('random Qwen seed remains minus one in restored editor settings',()=>{
+ const defaults={mode:'polish',provider:'mock',model:QWEN_MODEL,quality:'medium',format:'png',width:512,height:512,...qwenDefaults};
+ const p={...defaults,qwen_seed:-1};
+ assert.equal(qwenProblem(p),'');assert.ok(qwenProblem({...p,qwen_seed:-2}));
+ assert.equal(recoverDraft({p,refs:[],strokes:[],redo:[]},defaults).payload.p.qwen_seed,-1);
+});
+
+
+test('old preset-first drafts restore with manual instruction first',()=>{
+ const editor={selected:['hair-opaque'],values:{},extra:'二人がお茶会をしている\n背景は庭園'};
+ const old=instructionPresets.change[0][2]+'\n'+editor.extra;
+ for(const saved of [editor,null]){
+  const restored=restoreInstructions('change',old,saved);
+  assert.deepEqual(restored,editor);
+  assert.equal(composeInstructions('change',restored),editor.extra+'\n'+instructionPresets.change[0][2]);
+ }
 });
