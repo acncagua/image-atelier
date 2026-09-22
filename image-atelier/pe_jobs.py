@@ -95,6 +95,8 @@ class PEJobs:
             if self.get(ident)['status']=='cancelled':return
         else:return
         try:
+            from comfy_backend import guard
+            guard(self.store)
             self.store.qwen_session.unload()
             with self.lock:
                 j=read_record(self.store,ident)

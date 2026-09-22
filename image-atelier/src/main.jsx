@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {api,bootstrap,upload} from './api';
 import Canvas from './Canvas';
 import QwenControls from './QwenControls';
+import {followedResult} from './jobResult';
 import {promptInputKey} from './promptRevision';
 import {QWEN_MODEL,qwenDefaults,qwenProblem,referenceLimit} from './qwenOptions';
 import ImageViewer from './ImageViewer';
@@ -77,7 +78,7 @@ function App(){
   return()=>{alive=false;};
  },[draft.id]);
  useEffect(()=>{if(draft.ready&&promptSourceKey!==sourceKey){setPEApplied(null);setPEResultId(null);}},[sourceKey,promptSourceKey,draft.ready]);
- useEffect(()=>{const job=[...jobs,...gpuJobs].find(j=>j.id===follow);if(job&&['completed','failed','unknown','local_error','cancelled','interrupted','export_failed'].includes(job.status)){if(job.output)setResult(job.output);else if(job.outputs?.length)setResult(job.outputs.at(-1));setFollow(null);}},[jobs,gpuJobs,follow]);
+ useEffect(()=>{if(!follow)return;const job=[...jobs,...gpuJobs].find(j=>j.id===follow);const next=followedResult(job);if(next.image)setResult(next.image);if(next.done)setFollow(current=>current===follow?null:current);},[jobs,gpuJobs,follow]);
  async function acknowledge(job){if(!job)return;setRetrySource(null);setTracked(ids=>[...new Set([...ids,job.id])]);setFollow(job.id);setPending(registration.current.record);setPromptOpen(false);setMessage('ジョブを受け付けました。別の実行は新しいIDで登録できます。');await refresh();}
  async function reconcile(){await act(async()=>{setBusy(true);try{await bootstrap();await acknowledge(await registration.current.reconcile());}finally{setPending(registration.current.record);setBusy(false);}});}
  async function loadSavedDraft(record){await act(async()=>{await draft.flush();const id=crypto.randomUUID();const payload=record.payload?.payload||record.payload;await writeRecord('drafts',{...record,payload,id,revision:1,updated:Date.now()});sessionStorage.setItem('atelier-draft-id',id);window.location.reload();});}

@@ -1,5 +1,7 @@
 # Image Atelier
 
+> **v0.4.0**：Qwenの画像生成はComfyUI経由です。[ComfyUI準備手順](docs/COMFYUI_SETUP.md)を確認してください。以前のDiffusers版は[v0.3.1](https://github.com/acncagua/image-atelier/releases/tag/v0.3.1)に保存しています。
+
 Windowsで使う、OpenAI画像APIとローカルQwenに対応した画像編集UIです。元画像と役割付き資料を読み込み、指示文を確認して編集し、結果を比較・保存します。初期設定はモックです。実APIで新規生成・資料付き編集・マスク編集を確認済みです。試験の費用と結果不明の1件については [実API検証記録](docs/LIVE_TEST_RESULTS.md) を参照してください。
 
 最初は「起動」と「モックで試す」を読んでください。API設定や部分修正の説明は、使うときに参照できます。

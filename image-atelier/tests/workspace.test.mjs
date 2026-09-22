@@ -241,3 +241,18 @@ test('dismissed PE results stay hidden even when old registration is polled agai
  // Explicit history restore is the only way to show the adopted result again.
  assert.equal(enhancementVisible(job,'enhanced',true,'pe1','pe1'),true);
 });
+
+import {followedResult} from '../src/jobResult.js';
+test('Qwen result tracking survives the intermediate local recovery state',()=>{
+ let following=true;let shown=null;const image={id:'new-result'};
+ for(const job of [{status:'sending',outputs:[]},{status:'local_error',outputs:[]},{status:'completed',outputs:[image]}]){
+  if(following){const next=followedResult(job);if(next.image)shown=next.image;if(next.done)following=false;}
+ }
+ assert.equal(shown,image);assert.equal(following,false);
+});
+test('recoverable and incomplete results remain followed; completed GPU output finishes',()=>{
+ for(const status of ['local_error','unknown','interrupted','export_failed','completed'])assert.equal(followedResult({status,outputs:[]}).done,false);
+ const image={id:'upscale'};assert.deepEqual(followedResult({status:'completed',output:image}),{image,done:true});
+ assert.equal(followedResult({status:'cancelled'}).done,true);
+ assert.equal(followedResult({status:'failed'}).done,true);
+});

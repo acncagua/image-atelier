@@ -33,10 +33,15 @@ def mask_instruction(p):
     return f'[Qwen編集範囲]\n画像1は編集対象の元画像です。画像{number}は画像1と同じ位置・寸法の白黒マスクです。白い部分だけが変更対象で、黒い部分は維持してください。マスクは範囲の指定であり、完成画像にマスクや白黒の塗りを描かないでください。変更指示を白い範囲に適用し、周囲になじませてください。'
 
 def configuration(store):
+    if not getattr(store,'_legacy_qwen_test',False):
+        import comfy_backend
+        return comfy_backend.configuration(store)
     root=Path(__file__).resolve().parent;file=store.path/'qwen-settings.json'
     return json.loads(file.read_text('utf-8-sig')) if file.exists() else {'python':str(root/'.venv-qwen/Scripts/python.exe'),'model':str(root/'models/Qwen-Image-2.1')}
 
 def configure(store,data):
+    # Legacy adapter is retained only for explicit test fixtures and old records.
+    store._legacy_qwen_test=True
     values={k:str(data.get(k,'')) for k in ('python','model')}
     if any(not Path(v).is_absolute() for v in values.values()):raise ValueError('Qwen環境は絶対パスで指定してください。')
     if Path(values['python']).name.lower() not in ('python.exe','python','python3'):raise ValueError('Python実行ファイルを指定してください。')
@@ -64,6 +69,10 @@ def recover(store):
     qwen_session.recover(store)
     for job in store.jobs():
         if job['params']['provider']!='qwen':continue
+        if job.get('local_machine',{}).get('backend')=='comfyui':
+            if job['status'] in ('sending','queued'):
+                job.update(status='unknown' if job.get('comfy_prompt_id') else 'failed',message='ComfyUIの中断ジョブを照合してください。自動再送はしません。');store.save_job(job)
+            continue
         folder=directory(store,job['id']);reap_tree(folder)
         if job['status'] in ('sending','queued'):
             job.update(status='failed',message='Qwen処理はアプリ終了で中断しました。自動で再推論しません。')
@@ -80,6 +89,9 @@ def cancel(store,ident):
         job.update(message='Qwenの取消処理中…');store.save_job(job);return job
 
 def run(worker,ident):
+    if worker.store.job(ident).get('local_machine',{}).get('backend')=='comfyui':
+        import comfy_backend
+        return comfy_backend.run(worker,ident)
     store=worker.store;folder=directory(store,ident);child=None;started=time.monotonic()
     with store.gpu_execution:
         with store.lock:

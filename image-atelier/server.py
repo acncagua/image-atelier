@@ -1,5 +1,6 @@
 from billing import usage_summary
 import qwen_backend
+import comfy_backend
 from pe_jobs import PEJobs
 import base64
 import io
@@ -249,10 +250,16 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         return {'selected':False}
 
     @app.get('/api/qwen/config')
-    def qwen_config():return qwen_backend.configuration(store)
+    def qwen_config():return comfy_backend.configuration(store)
 
     @app.post('/api/qwen/config')
-    async def qwen_configure(request:Request):return qwen_backend.configure(store,await body(request))
+    async def qwen_configure(request:Request):return comfy_backend.configure(store,await body(request))
+
+    @app.post('/api/comfy/check')
+    async def comfy_check():return await run_in_threadpool(comfy_backend.check,store)
+
+    @app.post('/api/comfy/recover')
+    async def comfy_recover():return await run_in_threadpool(comfy_backend.recover,store,worker)
 
     @app.get('/api/upscale/config')
     def upscale_config():return gpu.public_config()

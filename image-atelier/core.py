@@ -271,7 +271,10 @@ class Store:
             job={'id':p['id'],'fingerprint':digest,'params':p,'status':'queued','created':datetime.now(timezone.utc).isoformat(),'reserved':reserved,'estimate':None,'message':'待機中','outputs':[]}
             if is_qwen:
                 machine=qwen_backend.configuration(self)
-                if not Path(machine['python']).is_file() or not (Path(machine['model'])/'model_index.json').is_file():raise ValueError('Qwen専用Pythonまたはモデルが未設定です。Qwen環境設定を確認してください。')
+                if machine.get('backend')=='comfyui':
+                    if any(not machine.get(k) for k in ('diffusion','text_encoder','vae')):raise ValueError('ComfyUIの生成モデル・テキストエンコーダー・VAEを選択してください。')
+                    if p.get('qwen_timing'):raise ValueError('ComfyUI版のステップ別時間計測は未対応です。時間計測を解除してください。')
+                elif not Path(machine['python']).is_file() or not (Path(machine['model'])/'model_index.json').is_file():raise ValueError('Qwen専用Pythonまたはモデルが未設定です。Qwen環境設定を確認してください。')
                 job['local_machine']=machine
                 if p.get('pe_job_id'):
                     from pe_jobs import read_record,input_context
