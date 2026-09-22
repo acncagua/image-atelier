@@ -46,7 +46,7 @@ class Jobs(unittest.TestCase):
         self.model=self.path/'test.pth';self.model.write_text('normal')
         self.manager=UpscaleJobs(self.s,ROOT/'tests/fake_upscale_runner.py')
         self.manager.configure({'python':sys.executable,'model':str(self.model)})
-    def tearDown(self):self.manager.shutdown();self.s.db.close();self.temp.cleanup()
+    def tearDown(self):self.s.qwen_session.unload();self.manager.shutdown();self.s.db.close();self.temp.cleanup()
     def body(self,**extra):return {'id':str(uuid.uuid4()),'source_id':self.image['id'],'options':{'mode':'factor','factor':2},**extra}
     def test_dedup_and_budget_isolation(self):
         body=self.body();before=self.s.settings()

@@ -134,7 +134,7 @@ import {instructionPresets,composeInstructions,parseInstructions,restoreInstruct
 test('instruction presets compose selected templates and extra text without duplication',()=>{
  const e={selected:['polish','expression'],values:{expression:'少し困った笑顔'},extra:'文字は読みやすくしてください。'};
  const text=composeInstructions('change',e);
- assert.ok(text.includes('【少し困った笑顔】'));assert.ok(text.endsWith(e.extra));
+ assert.ok(text.includes('【少し困った笑顔】'));assert.ok(text.startsWith(e.extra));
  assert.deepEqual(parseInstructions('change',text),e);
  assert.equal(composeInstructions('change',{...e,selected:[]}),e.extra);
 });
@@ -208,4 +208,15 @@ test('random Qwen seed remains minus one in restored editor settings',()=>{
  const p={...defaults,qwen_seed:-1};
  assert.equal(qwenProblem(p),'');assert.ok(qwenProblem({...p,qwen_seed:-2}));
  assert.equal(recoverDraft({p,refs:[],strokes:[],redo:[]},defaults).payload.p.qwen_seed,-1);
+});
+
+
+test('old preset-first drafts restore with manual instruction first',()=>{
+ const editor={selected:['hair-opaque'],values:{},extra:'二人がお茶会をしている\n背景は庭園'};
+ const old=instructionPresets.change[0][2]+'\n'+editor.extra;
+ for(const saved of [editor,null]){
+  const restored=restoreInstructions('change',old,saved);
+  assert.deepEqual(restored,editor);
+  assert.equal(composeInstructions('change',restored),editor.extra+'\n'+instructionPresets.change[0][2]);
+ }
 });

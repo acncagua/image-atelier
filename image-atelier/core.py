@@ -1,5 +1,6 @@
 from billing import usage_summary
 import qwen_backend
+import qwen_session
 import copy
 import base64
 import hashlib
@@ -43,6 +44,7 @@ def validate_size(w, h):
         raise ValueError('未対応の寸法です。各辺16の倍数、比率1:3〜3:1、各辺3840以下、655,360〜8,294,400画素。候補: 1920×1088 / 2048×1152（16:9） / 1024×1024。自動変更はしません。')
 
 def prompt_for(p):
+    if p.get("model")==qwen_backend.MODEL:return p.get("change", "")
     new_reference=p.get('model')==qwen_backend.MODEL and p['mode']=='generate' and bool(p.get('refs'))
     lines = ['モード: '+p['mode']]
     if new_reference:lines.append('参照資料を使った新規作成です。入力画像は編集対象のキャンバスではなく、人物や画風などの特徴を確認する資料です。下記の作成内容に沿った新しい1枚を描いてください。参照画像の背景・構図・ポーズ・文字・レイアウトは自動的に踏襲せず、明示的に指定した場合のみ引き継いでください。維持指定は新しい絵でも保ちたい特徴・条件として扱ってください。')
@@ -103,6 +105,7 @@ class Store:
         (self.path/'assets').mkdir(exist_ok=True)
         self.lock = threading.RLock()
         self.gpu_execution = threading.RLock()
+        self.qwen_session = qwen_session.Session(self)
         self.asset_lock = threading.RLock()
         self.db = sqlite3.connect(self.path/'history.sqlite3', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
@@ -271,10 +274,12 @@ class Store:
                 if not Path(machine['python']).is_file() or not (Path(machine['model'])/'model_index.json').is_file():raise ValueError('Qwen専用Pythonまたはモデルが未設定です。Qwen環境設定を確認してください。')
                 job['local_machine']=machine
                 if p.get('pe_job_id'):
-                    from pe_jobs import read_record
+                    from pe_jobs import read_record,input_context
                     enhancement=read_record(self,p['pe_job_id'])
-                    if enhancement['status']!='completed' or p['mode']!='generate' or p['refs']:raise ValueError('採用できるPE-T2I結果ではありません。')
-                    job['prompt_enhancement']={'id':enhancement['id'],'source_prompt':enhancement['params']['prompt'],'result':enhancement['result'],'model':'Qwen-Image-2.1-PE-T2I'}
+                    if enhancement['status']!='completed':raise ValueError('採用できる補強結果ではありません。')
+                    context=enhancement['params'].get('context')
+                    if (context is not None and context!=input_context(p)) or (context is None and (p['mode']!='generate' or p['refs'])):raise ValueError('補強時と画像・編集範囲が異なります。再補強してください。')
+                    job['prompt_enhancement']={'id':enhancement['id'],'source_prompt':enhancement['params']['prompt'],'result':enhancement['result'],'model':'Qwen-Image-2.1-PE-I2I' if context is not None else 'Qwen-Image-2.1-PE-T2I'}
             self.db.execute('INSERT INTO jobs VALUES (?,?,?)',(job['id'],digest,json.dumps(job,ensure_ascii=False)))
             self.db.commit()
             return job

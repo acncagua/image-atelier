@@ -1,6 +1,7 @@
 """Qwen local adapter for the existing durable Atelier job/history contract."""
 import base64
 import json
+import math
 import os
 import secrets
 import time
@@ -11,9 +12,13 @@ from persistence import atomic_write
 from managed_child import launch,reap_tree,tree_exited
 
 MODEL='Qwen-Image-2.1'
-DEFAULTS={'qwen_steps':40,'qwen_seed':42,'qwen_offload':'model','qwen_tile':512,'qwen_stride':384}
+DEFAULTS={'qwen_timing':False,'qwen_cfg':1.0,'qwen_negative':'','qwen_steps':40,'qwen_seed':42,'qwen_offload':'model','qwen_tile':512,'qwen_stride':384}
 
 def validate(p):
+    if type(p['qwen_timing']) is not bool:raise ValueError('時間計測の設定が不正です。')
+    cfg=p['qwen_cfg']
+    if type(cfg) not in (int,float) or not math.isfinite(cfg) or not 1<=cfg<=5:raise ValueError('CFGは1〜5で指定してください。')
+    if not isinstance(p['qwen_negative'],str) or len(p['qwen_negative'])>32000:raise ValueError('ネガティブプロンプトは32,000文字以下で指定してください。')
     if p['provider']!='qwen' or p['model']!=MODEL:raise ValueError('QwenモデルはローカルQwen接続で実行してください。')
     if p['mode'] not in ('generate','polish','inpaint'):raise ValueError('Qwenのモードが不正です。')
     if p['n']!=1 or p['format']!='png':raise ValueError('Qwenは1枚・PNGで実行してください。')
@@ -55,6 +60,8 @@ def collect(store,job):
     store.write_response(job['id'],json.dumps({'images':[base64.b64encode(raw).decode()],'usage':None,'request_id':'local-qwen-'+job['id']}).encode(),'local-qwen-'+job['id'])
 
 def recover(store):
+    import qwen_session
+    qwen_session.recover(store)
     for job in store.jobs():
         if job['params']['provider']!='qwen':continue
         folder=directory(store,job['id']);reap_tree(folder)
@@ -87,6 +94,7 @@ def run(worker,ident):
         try:
             p=job['params'];machine=job['local_machine']
             request={'model':machine['model'],'inputs':[str(store.file(i)) for i in p['input_ids']],
+                     'timing':p.get('qwen_timing',False),'true_cfg_scale':p.get('qwen_cfg',1.0),'negative_prompt':p.get('qwen_negative',''),
                      'prompt':p['prompt'],'width':p['width'],'height':p['height'],'steps':p['qwen_steps'],
                      'seed':job['qwen_seed_used'],'offload':p['qwen_offload'],'vae_tiling':True,
                      'vae_tile_size':p['qwen_tile'],'vae_tile_stride':p['qwen_stride'],'output':str(folder/'result.png')}
@@ -95,14 +103,13 @@ def run(worker,ident):
                 mask=mask_image((source['width'],source['height']),p['strokes'])
                 asset=store.asset(png(mask.convert('RGB')),'Qwen編集マスク（白＝変更）',p['target'],'mask',identity=ident+':qwen-mask')
                 request['inputs'].append(str(store.file(asset['id'])))
-                note=mask_instruction(p)
-                if note not in request['prompt']:request['prompt']+='\n\n'+note
                 with store.lock:
                     job=store.job(ident);job['mask']=asset;job['qwen_input_count']=len(request['inputs']);store.save_job(job)
             atomic_write(folder/'request.json',json.dumps(request,ensure_ascii=False).encode('utf-8'))
             root=Path(__file__).resolve().parent
             env={k:v for k,v in os.environ.items() if not any(x in k.upper() for x in ('API_KEY','TOKEN','SECRET'))}
             env.update(HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',HF_HUB_DISABLE_TELEMETRY='1',PYTHONUTF8='1')
+            store.qwen_session.unload()
             child=launch([machine['python'],'-I',str(getattr(store,'qwen_runner',root/'qwen_trial.py')),'--worker',str(folder/'request.json')],folder,root,env)
             last=None;deadline=time.monotonic()+1800
             while child.poll() is None:
@@ -116,7 +123,7 @@ def run(worker,ident):
                     with store.lock:
                         job=store.job(ident)
                         if not (folder/'cancel').exists():
-                            job.update(message='Qwen: '+{'loading':'モデル読込','initializing':'準備','inference_start':'推論準備','generating':'生成','decoding':'画像変換','saving':'画像保存'}.get(mark[0],str(mark[0] or '起動中'))+(f" {mark[1]}/{p['qwen_steps']}" if mark[1] else ''),qwen_progress=state.get('step'))
+                            job.update(message='Qwen: '+{'reusing_model':'読込済みモデルを再利用','loading':'モデル読込','initializing':'準備','inference_start':'推論準備','generating':'生成','decoding':'画像変換','saving':'画像保存'}.get(mark[0],str(mark[0] or '起動中'))+(f" {mark[1]}/{p['qwen_steps']}" if mark[1] else ''),qwen_progress=state.get('step'),qwen_timing=state.get('timing'))
                             store.save_job(job)
                     last=mark
                 time.sleep(.2)
@@ -125,7 +132,7 @@ def run(worker,ident):
                 if (folder/'cancel').exists():job.update(status='cancelled',message='Qwen処理を取消しました。子プロセスは終了済みです。');store.save_job(job);return
                 try:state=json.loads((folder/'status.json').read_text('utf-8'))
                 except (OSError,ValueError):state={}
-                job.update(status='local_error',qwen_environment=state.get('environment'),qwen_peak_cuda_bytes=state.get('peak_cuda_allocated_bytes'))
+                job.update(status='local_error',qwen_timing=state.get('timing'),qwen_model_reused=state.get('model_reused',False),qwen_environment=state.get('environment'),qwen_peak_cuda_bytes=state.get('peak_cuda_allocated_bytes'))
                 store.save_job(job)
                 if not available(store,job):raise RuntimeError(state.get('message') or 'Qwenから有効な出力画像を取得できませんでした。')
                 collect(store,job);worker._reprocess(ident)

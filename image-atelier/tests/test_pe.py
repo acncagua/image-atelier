@@ -15,7 +15,7 @@ class PE(unittest.TestCase):
         fixture.Jobs.setUp(self)
         self.pe=PEJobs(self.s,ROOT/'tests/fake_pe_runner.py')
         self.pe_model=self.path/'pe-model';self.pe_model.mkdir();(self.pe_model/'system_prompt.txt').write_text('test')
-        self.pe.configure({'python':sys.executable,'model':str(self.pe_model)})
+        self.pe.configure({'python':sys.executable,'model':str(self.pe_model),'model_i2i':str(self.pe_model)})
     def tearDown(self):self.pe.shutdown();fixture.Jobs.tearDown(self)
     def body(self,**extra):return {'id':uuid.uuid4().hex,'model':'Qwen-Image-2.1','mode':'generate','refs':[],'prompt':'宮殿の人物',**extra}
     def test_success_is_not_image_generation(self):
@@ -32,6 +32,52 @@ class PE(unittest.TestCase):
     def test_rejects_images_and_edit_modes(self):
         for extra in ({'mode':'polish'},{'refs':[{'id':'ref'}]},{'model':'other'},{'max_new_tokens':0}):
             with self.assertRaises(ValueError):self.pe.submit(self.body(**extra))
+    def test_i2i_reference_order_and_adoption(self):
+        import qwen_backend as q
+        from PIL import Image
+        from imaging import png
+        other=self.s.asset(png(Image.new('RGB',(512,512),'blue')))
+        refs=[{'id':other['id'],'role':'body'}]
+        p=self.body(mode='polish',target=self.image['id'],refs=refs)
+        self.pe.submit(p);self.pe.run(p['id'])
+        result=self.pe.get(p['id']);self.assertEqual(result['status'],'completed')
+        request=json.loads((directory(self.s,p['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(request['inputs'],[str(self.s.file(self.image['id'])),str(self.s.file(other['id']))])
+        model=self.path/'qwen';model.mkdir();(model/'model_index.json').write_text('{}')
+        q.configure(self.s,{'python':sys.executable,'model':str(model)})
+        params={**p,'id':uuid.uuid4().hex,'provider':'qwen','width':512,'height':512,'n':1,'format':'png','pe_job_id':p['id'],**q.DEFAULTS}
+        j=self.s.submit(params);self.assertEqual(j['prompt_enhancement']['model'],'Qwen-Image-2.1-PE-I2I')
+        with self.assertRaises(ValueError):self.s.submit({**params,'id':uuid.uuid4().hex,'refs':[]})
+        with self.assertRaises(JobConflict):self.pe.submit({**p,'refs':[]})
+
+    def test_i2i_mask_and_generate_ignore_source(self):
+        refs=[{'id':self.image['id'],'role':'face'}]
+        p=self.body(target='unused',refs=refs)
+        self.pe.submit(p);self.pe.run(p['id'])
+        r=json.loads((directory(self.s,p['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(r['inputs'],[str(self.s.file(self.image['id']))])
+        p=self.body(mode='inpaint',target=self.image['id'],refs=refs,strokes=[{'width':10,'points':[[5,5]],'erase':False}])
+        self.pe.submit(p);self.pe.run(p['id'])
+        r=json.loads((directory(self.s,p['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(len(r['inputs']),3);self.assertTrue(r['inputs'][-1].endswith('mask.png'))
+
+    def test_i2i_preprocessing_caps_pixels_without_changing_source(self):
+        from PIL import Image
+        from pe_runner import load_edit_image
+        file=self.path/'large.png'
+        Image.new('RGB',(2048,1024),'blue').save(file)
+        original=file.read_bytes();image=load_edit_image(file)
+        self.assertLessEqual(image.width*image.height,1024*1024)
+        self.assertAlmostEqual(image.width/image.height,2,places=2)
+        self.assertEqual(file.read_bytes(),original)
+        self.assertEqual(load_edit_image(self.s.file(self.image['id'])).size,(31,25))
+
+    def test_i2i_ratio_follow(self):
+        r=parse_result('{"rewritten_prompt":"Edit image","wh_ratio":"","ratio_follow":"<image1>"}')
+        self.assertEqual(r['ratio_follow'],'<image1>')
+        for ratio,follow in [('1:1','<image1>'),('','<image0>'),('','')]:
+            with self.assertRaises(ValueError):parse_result(json.dumps({'rewritten_prompt':'x','wh_ratio':ratio,'ratio_follow':follow}))
+
     def test_cancel_inference_preserves_original(self):
         (self.pe_model/'wait').write_text('wait');p=self.body();self.pe.submit(p)
         t=threading.Thread(target=self.pe.run,args=(p['id'],));t.start()

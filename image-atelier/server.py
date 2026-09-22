@@ -54,6 +54,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         pe.shutdown()
         gpu.shutdown()
         if run_worker: worker.thread.join()
+        store.qwen_session.unload()
         if lock_file: lock_file.close()
     app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
     app.state.store=store
@@ -230,6 +231,22 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
 
     @app.post('/api/pe/jobs/{ident}/cancel')
     def pe_cancel(ident:str):return pe.cancel(ident)
+
+    @app.post('/api/qwen/session')
+    async def qwen_selection(request:Request):
+        p=await body(request)
+        selected=p.get('selected')
+        if type(selected) is not bool:raise ValueError('selected must be boolean')
+        store.qwen_session.selected=False
+        # Never interrupt the current job because the user changes the dropdown.
+        # The invocation releases its process on completion if no longer selected.
+        def release_idle():
+            if store.gpu_execution.acquire(blocking=False):
+                try:
+                    if not store.qwen_session.selected:store.qwen_session.unload()
+                finally:store.gpu_execution.release()
+        await run_in_threadpool(release_idle)
+        return {'selected':False}
 
     @app.get('/api/qwen/config')
     def qwen_config():return qwen_backend.configuration(store)

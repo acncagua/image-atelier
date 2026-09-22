@@ -8,6 +8,10 @@ from persistence import atomic_write,safe_id,now
 from managed_child import launch,reap_tree
 from pe_runner import parse_result
 
+def input_context(p):
+    return {'mode':p.get('mode','generate'),'target':p.get('target') if p.get('mode')!='generate' else None,
+            'refs':[r['id'] for r in p.get('refs',[])], 'strokes':p.get('strokes',[]) if p.get('mode')=='inpaint' else []}
+
 def directory(store,ident):return store.path/'pe-jobs'/safe_id(ident)
 def read_record(store,ident):
     file=store.path/'pe-jobs'/(safe_id(ident)+'.json')
@@ -24,9 +28,10 @@ class PEJobs:
         self.thread=threading.Thread(target=self.loop,daemon=True)
     def config(self):
         file=self.store.path/'pe-settings.json';root=Path(__file__).resolve().parent
-        return json.loads(file.read_text('utf-8-sig')) if file.exists() else {'python':str(root/'.venv-qwen/Scripts/python.exe'),'model':str(root/'models/Qwen-Image-2.1-PE-T2I')}
+        values=json.loads(file.read_text('utf-8-sig')) if file.exists() else {'python':str(root/'.venv-qwen/Scripts/python.exe'),'model':str(root/'models/Qwen-Image-2.1-PE-T2I')}
+        values.setdefault('model_i2i',str(root/'models/Qwen-Image-2.1-PE-I2I'));return values
     def configure(self,p):
-        values={key:str(p.get(key,'')) for key in ('python','model')}
+        values={key:str(p.get(key,self.config().get(key,''))) for key in ('python','model','model_i2i')}
         if any(not Path(v).is_absolute() for v in values.values()) or Path(values['python']).name.lower() not in ('python.exe','python','python3'):raise ValueError('専用Pythonとモデルは絶対パスで指定してください。')
         atomic_write(self.store.path/'pe-settings.json',json.dumps(values).encode());return values
     def save(self,j):atomic_write(self.root/(j['id']+'.json'),json.dumps(j,ensure_ascii=False).encode('utf-8'))
@@ -36,18 +41,28 @@ class PEJobs:
     def submit(self,p):
         from core import JobConflict
         ident=safe_id(p['id'])
-        if p.get('model')!='Qwen-Image-2.1' or p.get('mode')!='generate' or p.get('refs'):raise ValueError('PE-T2Iは参照画像なしのQwen新規生成専用です。')
+        if p.get('model')!='Qwen-Image-2.1' or p.get('mode') not in ('generate','polish','inpaint'):raise ValueError('Qwenの生成・編集用の指示補強です。')
+        context=input_context(p)
+        ids=([context['target']] if context['mode']!='generate' else [])+context['refs']
+        if len(ids)+(context['mode']=='inpaint')>10:raise ValueError('補強の入力はマスクを含め10枚までです。')
+        for ident_image in ids:self.store.meta(ident_image or '')
+        if context['mode']=='inpaint':
+            from imaging import mask_image
+            meta=self.store.meta(context['target'])
+            if not mask_image((meta['width'],meta['height']),context['strokes']).getbbox():raise ValueError('編集範囲を指定してください。')
         prompt=p.get('prompt');limit=p.get('max_new_tokens',8192);seed=p.get('seed',42)
         if not isinstance(prompt,str) or not prompt.strip() or len(prompt)>16000:raise ValueError('補強元の指示は1〜16,000文字で指定してください。')
-        if type(limit) is not int or not 256<=limit<=16256 or type(seed) is not int or not 0<=seed<=4294967295:raise ValueError('補強パラメータが範囲外です。')
+        if type(limit) is not int or not 256<=limit<=24000 or type(seed) is not int or not 0<=seed<=4294967295:raise ValueError('補強パラメータが範囲外です。')
         params={'prompt':prompt,'max_new_tokens':limit,'seed':seed}
+        if ids:params.update(task='edit',context=context,input_ids=ids)
         with self.lock:
             if (self.root/(ident+'.json')).exists():
                 old=read_record(self.store,ident)
                 if old['params']!=params:raise JobConflict('同じ補強IDの入力が異なります。')
                 return self.public(old)
             machine=self.config()
-            if not Path(machine['python']).is_file() or not (Path(machine['model'])/'system_prompt.txt').is_file():raise ValueError('PE-T2Iのモデルまたは専用Pythonが未設定です。')
+            if ids:machine={**machine,'model':machine['model_i2i']}
+            if not Path(machine['python']).is_file() or not (Path(machine['model'])/'system_prompt.txt').is_file():raise ValueError('補強モデルまたは専用Pythonが未設定です。')
             j={'id':ident,'params':params,'machine':machine,'status':'queued','created':now(),'result':None,'message':'補強処理を待機中。画像は生成しません。'}
             self.save(j);return self.public(j)
     def cancel(self,ident):
@@ -80,11 +95,21 @@ class PEJobs:
             if self.get(ident)['status']=='cancelled':return
         else:return
         try:
+            self.store.qwen_session.unload()
             with self.lock:
                 j=read_record(self.store,ident)
                 if j['status']!='queued' or self.stop.is_set():return
-                folder.mkdir(exist_ok=True);j.update(status='running',message='PE-T2Iを読み込み中');self.save(j)
+                folder.mkdir(exist_ok=True);j.update(status='running',message='指示補強モデルを読み込み中');self.save(j)
             request={**j['params'],'model':j['machine']['model']}
+            if j['params'].get('input_ids'):
+                request['inputs']=[str(self.store.file(i)) for i in j['params']['input_ids']]
+                context=j['params']['context']
+                if context['mode']=='inpaint':
+                    from imaging import mask_image,png
+                    meta=self.store.meta(context['target'])
+                    mask=mask_image((meta['width'],meta['height']),context['strokes'])
+                    atomic_write(folder/'mask.png',png(mask.convert('RGB')))
+                    request['inputs'].append(str(folder/'mask.png'))
             atomic_write(folder/'request.json',json.dumps(request,ensure_ascii=False).encode('utf-8'))
             env={k:v for k,v in os.environ.items() if not any(x in k.upper() for x in ('API_KEY','TOKEN','SECRET'))}
             env.update(HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',HF_HUB_DISABLE_TELEMETRY='1',PYTHONUTF8='1')
@@ -102,7 +127,7 @@ class PEJobs:
                 if phase in ('loading','rewriting') and phase!=last_phase:
                     with self.lock:
                         j=read_record(self.store,ident)
-                        if j['status']=='running':j['message']='指示文を補強中…' if phase=='rewriting' else 'PE-T2Iを読み込み中…';self.save(j)
+                        if j['status']=='running':j['message']='指示文を補強中…' if phase=='rewriting' else '指示補強モデルを読み込み中…';self.save(j)
                     last_phase=phase
                 time.sleep(.3)
             if child.returncode!=0:

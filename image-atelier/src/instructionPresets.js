@@ -25,8 +25,12 @@ export const instructionPresets={
 export function presetText(preset,values={}){
  return preset[2].replace(/【([^】]+)】/g,(_,fallback)=>`【${values[preset[0]]??fallback}】`);
 }
-export function composeInstructions(kind,editor){
+function composeLegacy(kind,editor){
  return [...editor.selected.map(id=>instructionPresets[kind].find(p=>p[0]===id)).filter(Boolean).map(p=>presetText(p,editor.values)),editor.extra].filter(x=>x!=='').join('\n');
+}
+export function composeInstructions(kind,editor){
+ if(kind!=='change')return composeLegacy(kind,editor);
+ return [editor.extra,...editor.selected.map(id=>instructionPresets[kind].find(p=>p[0]===id)).filter(Boolean).map(p=>presetText(p,editor.values))].filter(x=>x!=='').join('\n');
 }
 export function parseInstructions(kind,text=''){
  const editor={selected:[],values:{},extra:''};const extra=[];
@@ -54,11 +58,11 @@ export function parseInstructions(kind,text=''){
  editor.extra=extra.join('\n');
  // Preserve arbitrary historical text byte-for-byte when it cannot be split
  // without changing its order (for example hand-written text before a preset).
- return composeInstructions(kind,editor)===text?editor:{selected:[],values:{},extra:text};
+ return (composeInstructions(kind,editor)===text||composeLegacy(kind,editor)===text)?editor:{selected:[],values:{},extra:text};
 }
 export function restoreInstructions(kind,text,saved){
  if(saved&&Array.isArray(saved.selected)&&new Set(saved.selected).size===saved.selected.length&&saved.selected.every(id=>instructionPresets[kind].some(p=>p[0]===id))&&saved.values&&typeof saved.values==='object'&&Object.values(saved.values).every(x=>typeof x==='string')&&typeof saved.extra==='string'){
-  if(composeInstructions(kind,saved)===text)return {selected:[...saved.selected],values:{...saved.values},extra:saved.extra};
+  if(composeInstructions(kind,saved)===text||composeLegacy(kind,saved)===text)return {selected:[...saved.selected],values:{...saved.values},extra:saved.extra};
  }
  return parseInstructions(kind,text);
 }

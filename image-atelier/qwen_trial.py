@@ -18,12 +18,17 @@ from qwen_diagnostics import memory_snapshot
 ROOT=Path(__file__).resolve().parent
 
 
-def execute(request_path):
+def execute(request_path, cache=None):
     request=json.loads(request_path.read_text('utf-8'));directory=request_path.parent
+    from qwen_timing import Timing
+    timing=Timing() if request.get('timing') else None
+    timing_hook=None
     phase='initializing'
     def report(**values):
         nonlocal phase
         phase=values.get('state',phase)
+        if timing:
+            timing.enter(phase);values['timing']=timing.snapshot()
         if request.get('diagnose'):
             values['memory']=memory_snapshot()
             with (directory/'phases.jsonl').open('a',encoding='utf-8') as log:log.write(json.dumps(values,ensure_ascii=False)+'\n')
@@ -40,25 +45,34 @@ def execute(request_path):
         from diffusers import QwenImage21Pipeline
         from qwen_probe import environment
         if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():raise RuntimeError('CUDA BF16 is required.')
-        report(state='loading')
-        pipe=QwenImage21Pipeline.from_pretrained(request['model'],torch_dtype=torch.bfloat16,local_files_only=True)
-        if request.get('vae_tiling'):
-            pipe.vae.enable_tiling(tile_sample_min_height=request.get('vae_tile_size',256),tile_sample_min_width=request.get('vae_tile_size',256),tile_sample_stride_height=request.get('vae_tile_stride',192),tile_sample_stride_width=request.get('vae_tile_stride',192))
-        report(state='configuring_offload')
-        if request['offload']=='sequential':pipe.enable_sequential_cpu_offload()
-        else:pipe.enable_model_cpu_offload()
+        key=tuple(request.get(k) for k in ('model','offload','vae_tiling','vae_tile_size','vae_tile_stride'))
+        reused=cache is not None and cache.get('key')==key
+        if reused:
+            pipe=cache['pipe'];report(state='reusing_model')
+        else:
+            report(state='loading')
+            pipe=QwenImage21Pipeline.from_pretrained(request['model'],torch_dtype=torch.bfloat16,local_files_only=True)
+            if request.get('vae_tiling'):
+                pipe.vae.enable_tiling(tile_sample_min_height=request.get('vae_tile_size',256),tile_sample_min_width=request.get('vae_tile_size',256),tile_sample_stride_height=request.get('vae_tile_stride',192),tile_sample_stride_width=request.get('vae_tile_stride',192))
+            report(state='configuring_offload')
+            if request['offload']=='sequential':pipe.enable_sequential_cpu_offload()
+            else:pipe.enable_model_cpu_offload()
+            if cache is not None:cache.update(key=key,pipe=pipe)
         original_decode=pipe.vae.decode
         def decode(*args,**kwargs):
+            if timing:torch.cuda.synchronize()
             report(state='decoding',vae_tiling=request.get('vae_tiling',False))
             return original_decode(*args,**kwargs)
         pipe.vae.decode=decode
         torch.cuda.reset_peak_memory_stats()
         def progress(pipeline,step,timestep,kwargs):
+            if timing:
+                torch.cuda.synchronize();timing.step(step)
             report(state='generating',step=step+1,total=request['steps'])
             return kwargs
         options={'prompt':request['prompt'],'width':request['width'],'height':request['height'],
                  'num_inference_steps':request['steps'],'generator':torch.Generator('cuda').manual_seed(request['seed']),
-                 'num_images_per_prompt':1,'true_cfg_scale':1.0,'callback_on_step_end':progress}
+                 'num_images_per_prompt':1,'true_cfg_scale':request.get('true_cfg_scale',1.0),'negative_prompt':request.get('negative_prompt',''),'callback_on_step_end':progress}
         if request.get('input'):
             report(state='reading_input')
             with Image.open(request['input']) as image:options['image']=image.convert('RGBA')
@@ -67,12 +81,19 @@ def execute(request_path):
             for file in request['inputs']:
                 with Image.open(file) as image:inputs.append(image.convert('RGBA'))
             options['image']=inputs[0] if len(inputs)==1 else inputs
+        if timing:
+            def first_forward(module,args):
+                if timing.step_mark is None:
+                    torch.cuda.synchronize();timing.first_forward()
+            timing_hook=pipe.transformer.register_forward_pre_hook(first_forward)
+            torch.cuda.synchronize()
         report(state='inference_start')
         result=pipe(**options).images[0]
+        if timing:torch.cuda.synchronize()
         report(state='saving')
         import io
         buffer=io.BytesIO();result.save(buffer,format='PNG');publish_new(Path(request['output']),buffer.getvalue())
-        report(state='completed',output=request['output'],size=list(result.size),mode=result.mode,
+        report(state='completed',model_reused=reused,output=request['output'],size=list(result.size),mode=result.mode,
                elapsed_seconds=round(time.monotonic()-started,3),peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
                environment=environment())
         return 0
@@ -81,6 +102,9 @@ def execute(request_path):
         atomic_write(directory/'error.txt',detail.encode('utf-8'))
         report(state='failed',failed_at=phase,error_type=type(error).__name__,message=str(error) or repr(error),traceback=detail,elapsed_seconds=round(time.monotonic()-started,3))
         return 1
+    finally:
+        if timing_hook is not None:timing_hook.remove()
+        if 'original_decode' in locals():pipe.vae.decode=original_decode
 
 
 def main():

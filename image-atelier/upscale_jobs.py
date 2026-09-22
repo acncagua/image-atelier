@@ -144,7 +144,9 @@ class UpscaleJobs:
 
     def run(self,ident):
         with self.store.gpu_execution:
-            if not self.stop.is_set():self._run(ident)
+            if not self.stop.is_set():
+                self.store.qwen_session.unload()
+                self._run(ident)
 
     def _run(self,ident):
         with self.lock:

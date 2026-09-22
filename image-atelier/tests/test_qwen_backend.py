@@ -29,8 +29,7 @@ class QwenJobs(unittest.TestCase):
         base=self.s.asset(png(Image.new('RGB',(512,512),'green')))
         p=self.params(target=base['id'],refs=[{'id':self.image['id'],'role':'face','person':'主人公'}],change='庭園で座る',keep='髪色を維持')
         p['prompt']=prompt_for(p)
-        self.assertIn('参照資料を使った新規作成',p['prompt'])
-        self.assertIn('作成する内容:',p['prompt']);self.assertNotIn('編集対象に合わせる',p['prompt'])
+        self.assertEqual(p['prompt'],'庭園で座る')
         job=self.s.submit(p);self.assertEqual(job['params']['input_ids'],[self.image['id']])
         Worker(self.s).run(job['id'])
         request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
@@ -48,6 +47,51 @@ class QwenJobs(unittest.TestCase):
         request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
         self.assertEqual(request['seed'],101)
         with self.assertRaises(ValueError):self.s.submit(self.params(qwen_seed=-2))
+    def test_cfg_negative_and_plain_prompt(self):
+        p=self.params(change='選択プリセット\n二人がお茶会をしている',keep='顔を維持',qwen_cfg=2.5,qwen_negative='collage, text',refs=[{'id':self.image['id'],'role':'body','person':'説明は送らない'}])
+        for mode in ('generate','polish','inpaint'):
+            self.assertEqual(prompt_for({**p,'mode':mode}),p['change'])
+        p['prompt']=prompt_for(p)
+        job=self.s.submit(p);Worker(self.s).run(job['id'])
+        request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
+        self.assertEqual(request['prompt'],p['change'])
+        self.assertEqual(request['negative_prompt'],'collage, text')
+        self.assertEqual(request['true_cfg_scale'],2.5)
+        for key,value in [('qwen_cfg',3),('qwen_negative','different')]:
+            with self.assertRaises(JobConflict):self.s.submit({**p,key:value})
+        for value in (0,5.1,float('inf'),True):
+            with self.assertRaises(ValueError):self.s.submit(self.params(qwen_cfg=value))
+        self.assertNotIn('qwen_negative',canonical_input({'model':'gpt-image-2.5-sunburst','qwen_negative':'x'}))
+
+    def test_each_generation_exits_and_does_not_retain_model(self):
+        from managed_child import tree_exited
+        worker=Worker(self.s)
+        with patch('qwen_backend.launch',wraps=q.launch) as launch:
+            for _ in range(2):
+                job=self.s.submit(self.params());worker.run(job['id'])
+                self.assertEqual(self.s.job(job['id'])['status'],'completed')
+                self.assertFalse(self.s.job(job['id'])['qwen_model_reused'])
+                self.assertTrue(tree_exited(q.directory(self.s,job['id'])))
+                self.assertIsNone(self.s.qwen_session.process)
+            self.assertEqual(launch.call_count,2)
+
+    def test_old_browser_cannot_enable_model_retention(self):
+        from fastapi.testclient import TestClient
+        from server import create_app
+        app=create_app(self.path/'endpoint',run_worker=False)
+        with TestClient(app) as client:
+            token=client.get('/api/bootstrap').json()['token']
+            response=client.post('/api/qwen/session',json={'selected':True},headers={'x-atelier-token':token})
+            self.assertEqual(response.json(),{'selected':False})
+            self.assertFalse(app.state.store.qwen_session.selected)
+        app.state.store.db.close()
+
+    def test_timing_option_and_record_survive_worker_boundary(self):
+        job=self.s.submit(self.params(qwen_timing=True));Worker(self.s).run(job['id'])
+        request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
+        self.assertTrue(request['timing'])
+        self.assertEqual(self.s.job(job['id'])['qwen_timing']['steps'],[{'step':1,'ms':125}])
+
     def test_parameters_are_part_of_idempotency(self):
         p=self.params();self.s.submit(p);self.s.submit(p)
         with self.assertRaises(JobConflict):self.s.submit({**p,'qwen_steps':8})
@@ -112,12 +156,12 @@ class QwenJobs(unittest.TestCase):
         from imaging import png
         source=self.s.asset(png(Image.new('RGBA',(512,512),(255,0,0,128))))
         strokes=[{'width':80,'points':[[256,256]],'erase':False},{'width':16,'points':[[256,256]],'erase':True}]
-        p=self.params(mode='inpaint',target=source['id'],strokes=strokes,composite=True,feather=8,
+        p=self.params(mode='inpaint',change='青くする',target=source['id'],strokes=strokes,composite=True,feather=8,
                       refs=[{'id':self.image['id'],'role':'outfit','person':'色見本'}])
         p['prompt']=prompt_for(p);job=self.s.submit(p);Worker(self.s).run(job['id'])
         result=self.s.job(job['id']);self.assertEqual(result['status'],'completed')
         request=json.loads((q.directory(self.s,job['id'])/'request.json').read_text('utf-8'))
-        self.assertEqual(len(request['inputs']),3);self.assertIn('画像3は',request['prompt'])
+        self.assertEqual(len(request['inputs']),3);self.assertEqual(request['prompt'],p['change'])
         with Image.open(request['inputs'][-1]) as mask:
             self.assertEqual(mask.convert('RGB').getpixel((280,256)),(255,255,255))
             self.assertEqual(mask.convert('RGB').getpixel((256,256)),(0,0,0))
