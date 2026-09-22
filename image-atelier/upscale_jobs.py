@@ -159,6 +159,8 @@ class UpscaleJobs:
                  'status':str(directory/'status.json'),'output':str(directory/'result.png'),
                  'diagnose':job['params']['kind']=='diagnostic','options':job['params']['options']}
         try:
+            from comfy_backend import guard
+            guard(self.store)
             if not request['diagnose']:request['input']=str(self.store.file(job['params']['source_id']))
             atomic_write(directory/'request.json',json.dumps(request).encode())
             env={k:v for k,v in os.environ.items() if not any(word in k.upper() for word in ('API_KEY','TOKEN','SECRET'))}
