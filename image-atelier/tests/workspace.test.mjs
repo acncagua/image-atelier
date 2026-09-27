@@ -256,3 +256,10 @@ test('recoverable and incomplete results remain followed; completed GPU output f
  assert.equal(followedResult({status:'cancelled'}).done,true);
  assert.equal(followedResult({status:'failed'}).done,true);
 });
+
+test('reference-sheet role and opt-in survive draft restoration',()=>{
+ const saved={p:{reference_sheets:true},refs:[{id:'sheet',role:'reference',person:'A'}],strokes:[],redo:[]};
+ const restored=recoverDraft(saved,{reference_sheets:false});
+ assert.equal(restored.payload.p.reference_sheets,true);
+ assert.equal(restored.payload.refs[0].role,'reference');
+});

@@ -22,7 +22,7 @@ from imaging import normalize, png, mask_image, api_mask, composite
 
 ROOT = Path(__file__).resolve().parent
 CAP = json.loads((ROOT / 'capabilities.json').read_text('utf-8'))
-ROLES = {'face':'顔立ちのみ。肌の塗り・光は編集対象に合わせる', 'body':'体型・髪型・全体の特徴', 'style':'色・肌・陰影・線・塗りの質感', 'outfit':'衣装・小物の形と配色'}
+ROLES = {'reference':'人物のリファレンス資料（三面図・多方向）','face':'顔立ちのみ。肌の塗り・光は編集対象に合わせる', 'body':'体型・髪型・全体の特徴', 'style':'色・肌・陰影・線・塗りの質感', 'outfit':'衣装・小物の形と配色'}
 
 def usage_cost(usage):
     """Only calculate when the returned token breakdown is unambiguous."""
@@ -43,22 +43,24 @@ def validate_size(w, h):
         not d['min_pixels'] <= w*h <= d['max_pixels'] or max(w,h)/min(w,h) > d['max_ratio']):
         raise ValueError('未対応の寸法です。各辺16の倍数、比率1:3〜3:1、各辺3840以下、655,360〜8,294,400画素。候補: 1920×1088 / 2048×1152（16:9） / 1024×1024。自動変更はしません。')
 
+def reference_instructions(p):
+    if not p.get('reference_sheets'):return []
+    offset=1 if p.get('mode')=='generate' else 2
+    return [f'<image{index+offset}>は、同じ人物の複数方向を描いたリファレンス資料です。\nこの画像内の各人物像を、別々の人物として扱わないでください。'
+            for index,ref in enumerate(p.get('refs',[])) if ref['role']=='reference']
+
 def prompt_for(p):
-    if p.get("model")==qwen_backend.MODEL:return p.get("change", "")
-    new_reference=p.get('model')==qwen_backend.MODEL and p['mode']=='generate' and bool(p.get('refs'))
-    lines = ['モード: '+p['mode']]
-    if new_reference:lines.append('参照資料を使った新規作成です。入力画像は編集対象のキャンバスではなく、人物や画風などの特徴を確認する資料です。下記の作成内容に沿った新しい1枚を描いてください。参照画像の背景・構図・ポーズ・文字・レイアウトは自動的に踏襲せず、明示的に指定した場合のみ引き継いでください。維持指定は新しい絵でも保ちたい特徴・条件として扱ってください。')
-    index = 1
-    if p.get('target') and p['mode'] != 'generate':
-        lines.append('画像1: 編集対象。構図・ポーズ・背景・現在の仕上がりの基準。')
-        index += 1
-    for ref in p.get('refs', []):
-        role=({'face':'人物の顔立ち・目鼻の配置・年齢感など、同一人物として描くための顔の特徴','body':'人物の体型・髪型・全身の特徴','style':'新しい絵に用いる色・肌・陰影・線・塗りの質感','outfit':'新しい絵に用いる衣装・小物の形と配色'} if new_reference else ROLES)[ref['role']]
-        lines.append(f"画像{index}: {role}。対象人物: {ref.get('person','指定なし')}")
-        index += 1
-    lines.extend([('作成する内容:\n' if new_reference else '変更すること:\n')+p.get('change',''), '維持すること:\n'+p.get('keep','')])
-    if p.get('model')==qwen_backend.MODEL and p['mode']=='inpaint':lines.append(qwen_backend.mask_instruction(p))
+    extra=reference_instructions(p)
+    if p.get('model')==qwen_backend.MODEL:
+        return '\n\n'.join([p.get('change',''),*extra]).strip() if extra else p.get('change','')
+    lines=['モード: '+p['mode']];index=1
+    if p.get('target') and p['mode']!='generate':
+        lines.append('画像1: 編集対象。構図・ポーズ・背景・現在の仕上がりの基準。');index+=1
+    for ref in p.get('refs',[]):
+        lines.append(f"画像{index}: {ROLES[ref['role']]}。対象人物: {ref.get('person','指定なし')}");index+=1
+    lines.extend(['変更すること:\n'+p.get('change',''),'維持すること:\n'+p.get('keep',''),*extra])
     return '\n\n'.join(lines)
+
 
 class JobConflict(ValueError):
     pass
@@ -91,6 +93,8 @@ def canonical_input(p):
     if result['model']==qwen_backend.MODEL:
         result.update({k:copy.deepcopy(p.get(k,v)) for k,v in qwen_backend.DEFAULTS.items()})
         if p.get('pe_job_id'):result['pe_job_id']=safe_id(p['pe_job_id'])
+    if type(p.get('reference_sheets',False)) is not bool:raise ValueError('リファレンス指定が不正です。')
+    if p.get('reference_sheets'):result['reference_sheets']=True
     result['feather']=float(result['feather'])
     return result
 

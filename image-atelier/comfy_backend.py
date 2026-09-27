@@ -46,8 +46,10 @@ def inspect(c):
     def choices(node,key):
         return info.get(node,{}).get('input',{}).get('required',{}).get(key,[[]])[0]
     standard=choices('UNETLoader','unet_name');gguf=choices('UnetLoaderGGUF','unet_name')
-    return {'missing':missing,'gguf_available':'UnetLoaderGGUF' in info,'gguf_diffusion':gguf,'standard_diffusion':standard,'diffusion':list(dict.fromkeys([*standard,*gguf])),
-            'text_encoder':choices('CLIPLoader','clip_name'),'vae':choices('VAELoader','vae_name')}
+    def encoder_files(names):return [name for name in names if not name.replace('\\','/').rsplit('/',1)[-1].lower().startswith('mmproj-')]
+    standard_te=encoder_files(choices('CLIPLoader','clip_name'));gguf_te=encoder_files(choices('CLIPLoaderGGUF','clip_name'))
+    return {'gguf_text_available':'CLIPLoaderGGUF' in info,'standard_text_encoders':standard_te,'gguf_text_encoders':gguf_te,'missing':missing,'gguf_available':'UnetLoaderGGUF' in info,'gguf_diffusion':gguf,'standard_diffusion':standard,'diffusion':list(dict.fromkeys([*standard,*gguf])),
+            'text_encoder':list(dict.fromkeys([*standard_te,*gguf_te])),'vae':choices('VAELoader','vae_name')}
 
 def check(store):
     try:
@@ -60,6 +62,9 @@ def validate_models(c,config):
     is_gguf=config['diffusion'].lower().endswith('.gguf')
     if is_gguf and not available['gguf_available']:raise ValueError('GGUFにはComfyUI-GGUFのUnetLoaderGGUFが必要です。導入後にComfyUIを再起動してください。')
     if config['diffusion'] not in available['gguf_diffusion' if is_gguf else 'standard_diffusion']:raise ValueError('選択形式のローダーにモデルがありません。モデル一覧を再取得してください。')
+    te_gguf=config['text_encoder'].lower().endswith('.gguf')
+    if te_gguf and not available['gguf_text_available']:raise ValueError('GGUFテキストエンコーダーにはCLIPLoaderGGUFが必要です。')
+    if config['text_encoder'] not in available['gguf_text_encoders' if te_gguf else 'standard_text_encoders']:raise ValueError('選択形式のテキストエンコーダーがありません。mmprojは本体として選択できません。')
     for name in ('diffusion','text_encoder','vae'):
         if config[name] not in available[name]:raise ValueError('ComfyUIにモデルがありません: '+name)
 
@@ -67,7 +72,7 @@ def workflow(p,config,seed,images,ident):
     def node(kind,**inputs):return {'class_type':kind,'inputs':inputs}
     graph={
         '1':node('UnetLoaderGGUF',unet_name=config['diffusion']) if config['diffusion'].lower().endswith('.gguf') else node('UNETLoader',unet_name=config['diffusion'],weight_dtype='default'),
-        '2':node('CLIPLoader',clip_name=config['text_encoder'],type='qwen_image',device='default'),
+        '2':node('CLIPLoaderGGUF',clip_name=config['text_encoder'],type='qwen_image') if config['text_encoder'].lower().endswith('.gguf') else node('CLIPLoader',clip_name=config['text_encoder'],type='qwen_image',device='default'),
         '3':node('VAELoader',vae_name=config['vae']),
         '4':node('TextEncodeQwenImage21',clip=['2',0],prompt=p['prompt'],negative_prompt=p.get('qwen_negative',''),resolution=1024),
         '5':node('EmptyLatentImage',width=p['width'],height=p['height'],batch_size=1),
@@ -98,6 +103,23 @@ def cancel_remote(c,ident):
 def free(c):
     running,pending=queue_ids(c)
     if not running and not pending:post(c,'/free',{'unload_models':True,'free_memory':True})
+
+def release_models(store,c):
+    if not getattr(store,'comfy_keep_models',False):free(c)
+
+def select_session(store,selected,keep):
+    store.comfy_keep_models=selected and keep
+    if store.comfy_keep_models:return {'retaining':True,'deferred':False}
+    if not store.gpu_execution.acquire(blocking=False):return {'retaining':False,'deferred':True}
+    try:
+        if not store.comfy_keep_models:
+            with client(configuration(store)) as c:free(c)
+        return {'retaining':store.comfy_keep_models,'deferred':False}
+    finally:store.gpu_execution.release()
+
+def release_for_other_gpu(store):
+    if getattr(store,'comfy_keep_models',False):
+        with client(configuration(store)) as c:free(c)
 
 def unresolved(store):
     return any(j['status']=='unknown' and j.get('local_machine',{}).get('backend')=='comfyui' for j in store.jobs())
@@ -187,7 +209,7 @@ def run(worker,ident):
                     history=get(c,'/history/'+remote_id)
                     if collect(store,job,c,history):
                         job.update(status='local_error');store.save_job(job)
-                        worker._reprocess(ident);free(c);return
+                        worker._reprocess(ident);release_models(store,c);return
                     with store.lock:
                         job=store.job(ident);job.update(message='ComfyUIで生成中（経過 '+str(round(time.monotonic()-started))+'秒）');store.save_job(job)
                     time.sleep(.5)

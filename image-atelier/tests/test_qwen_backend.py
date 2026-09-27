@@ -81,8 +81,9 @@ class QwenJobs(unittest.TestCase):
         app=create_app(self.path/'endpoint',run_worker=False)
         with TestClient(app) as client:
             token=client.get('/api/bootstrap').json()['token']
-            response=client.post('/api/qwen/session',json={'selected':True},headers={'x-atelier-token':token})
-            self.assertEqual(response.json(),{'selected':False})
+            with patch('comfy_backend.select_session',return_value={'retaining':False,'deferred':False}):
+                response=client.post('/api/qwen/session',json={'selected':True},headers={'x-atelier-token':token})
+            self.assertFalse(response.json()['retaining'])
             self.assertFalse(app.state.store.qwen_session.selected)
         app.state.store.db.close()
 

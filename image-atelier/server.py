@@ -235,19 +235,11 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
 
     @app.post('/api/qwen/session')
     async def qwen_selection(request:Request):
-        p=await body(request)
-        selected=p.get('selected')
-        if type(selected) is not bool:raise ValueError('selected must be boolean')
+        p=await body(request);selected=p.get('selected');keep=p.get('keep',False)
+        if type(selected) is not bool or type(keep) is not bool:raise ValueError('保持設定が不正です。')
         store.qwen_session.selected=False
-        # Never interrupt the current job because the user changes the dropdown.
-        # The invocation releases its process on completion if no longer selected.
-        def release_idle():
-            if store.gpu_execution.acquire(blocking=False):
-                try:
-                    if not store.qwen_session.selected:store.qwen_session.unload()
-                finally:store.gpu_execution.release()
-        await run_in_threadpool(release_idle)
-        return {'selected':False}
+        try:return await run_in_threadpool(comfy_backend.select_session,store,selected,keep)
+        except httpx.HTTPError:raise ValueError('ComfyUIへモデル解放を要求できません。ComfyUIの起動・接続を確認してください。')
 
     @app.get('/api/qwen/config')
     def qwen_config():return comfy_backend.configuration(store)

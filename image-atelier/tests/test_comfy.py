@@ -117,3 +117,46 @@ class Comfy(unittest.TestCase):
             available=c.inspect(client)
             self.assertIn(config['diffusion'],available['diffusion'])
             c.validate_models(client,config)
+
+    def test_keep_and_forced_unload_on_other_model(self):
+        with patch.object(c,'client',self.client):
+            c.select_session(self.s,True,True)
+            with self.client(self.config) as client:c.release_models(self.s,client)
+            self.assertFalse(any(path=='/free' for _,path,_ in self.calls))
+            c.select_session(self.s,False,True)
+            self.assertFalse(self.s.comfy_keep_models)
+            self.assertTrue(any(path=='/free' for _,path,_ in self.calls))
+            self.calls.clear();c.select_session(self.s,True,True);c.select_session(self.s,True,False)
+            self.assertTrue(any(path=='/free' for _,path,_ in self.calls))
+
+    def test_switch_during_job_defers_then_unloads(self):
+        import threading
+        entered=threading.Event();release=threading.Event()
+        def busy():
+            with self.s.gpu_execution:entered.set();release.wait(5)
+        t=threading.Thread(target=busy);t.start();entered.wait(5)
+        try:
+            with patch.object(c,'client',self.client):
+                self.assertTrue(c.select_session(self.s,True,False)['deferred'])
+                self.assertFalse(self.calls)
+        finally:release.set();t.join()
+        with self.client(self.config) as client:c.release_models(self.s,client)
+        self.assertTrue(any(path=='/free' for _,path,_ in self.calls))
+
+    def test_text_encoder_gguf_loader_and_mmproj_filter(self):
+        name='qwen3vl_8b_heretic-Q8_0.gguf'
+        config={**self.config,'text_encoder':name}
+        graph=c.workflow(self.params(),config,42,[],'job')
+        self.assertEqual(graph['2'],{'class_type':'CLIPLoaderGGUF','inputs':{'clip_name':name,'type':'qwen_image'}})
+        with self.client(config) as client:
+            with self.assertRaisesRegex(ValueError,'CLIPLoaderGGUF'):c.validate_models(client,config)
+        def handler(request):
+            response=self.handler(request)
+            if request.url.path=='/object_info':
+                info=response.json();info['CLIPLoaderGGUF']={'input':{'required':{'clip_name':[[name,'sub/mmproj-vision.gguf']]}}}
+                return httpx.Response(200,json=info)
+            return response
+        with httpx.Client(base_url=config['url'],transport=httpx.MockTransport(handler)) as client:
+            choices=c.inspect(client)['text_encoder']
+            self.assertIn(name,choices);self.assertNotIn('sub/mmproj-vision.gguf',choices)
+            c.validate_models(client,config)

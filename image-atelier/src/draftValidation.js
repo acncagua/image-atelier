@@ -17,7 +17,7 @@ export function recoverDraft(saved,defaults){
   payload[key]=values.filter(validStroke);
   if(!Array.isArray(saved[key])||payload[key].length!==values.length)warnings.push('不正・旧形式の '+key+' を原データに保持しました。');
  }
- payload.refs=(Array.isArray(saved.refs)?saved.refs:[]).filter(r=>r&&typeof r.id==='string'&&['face','body','style','outfit'].includes(r.role)).map(r=>({...r,person:typeof r.person==='string'?r.person:''}));
+ payload.refs=(Array.isArray(saved.refs)?saved.refs:[]).filter(r=>r&&typeof r.id==='string'&&['face','body','style','outfit','reference'].includes(r.role)).map(r=>({...r,person:typeof r.person==='string'?r.person:''}));
  if(payload.refs.length!==(saved.refs?.length||0))warnings.push('不正な参照資料を原データに保持しました。');
  payload.pan=Array.isArray(saved.pan)&&saved.pan.length===2&&saved.pan.every(Number.isFinite)?saved.pan:[0,0];
  payload.zoom=Number.isFinite(saved.zoom)?saved.zoom:0;
