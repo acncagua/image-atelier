@@ -24,6 +24,10 @@ from PIL import Image, ImageOps
 from local_config import api_key
 from upscale_jobs import UpscaleJobs
 from upscale_geometry import plan as upscale_plan
+from output_paths import FIELDS as OUTPUT_FIELDS,category_for_mode,LABELS as OUTPUT_LABELS
+import tag_completion
+import strata_client
+import gpu_status
 
 def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None, qwen_runner=None, pe_runner=None):
     store=Store(data_path or ROOT/'data')
@@ -32,6 +36,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     worker=Worker(store,mock_gate=mock_gate)
     gpu=UpscaleJobs(store,runner=gpu_runner)
     pe=PEJobs(store,runner=pe_runner)
+    store.vram.bind(worker,gpu,pe)
     @asynccontextmanager
     async def lifespan(app):
         lock_file=None
@@ -63,6 +68,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     app.state.worker=worker
     app.state.gpu=gpu
     app.state.pe=pe
+    app.state.vram=store.vram
     app.state.test_asset_fault=False
 
     @app.middleware('http')
@@ -133,6 +139,10 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         try:key_set=bool(api_key()) if mock_gate is None else False;config_error=None
         except ValueError:key_set=False;config_error='APIキー設定ファイルを読み込めません。ローカル設定を確認してください。'
         return {'token':token,'capabilities':CAP,'settings':store.settings(),'key_set':key_set,'config_error':config_error,'roles':ROLES,'test_mode':mock_gate is not None}
+
+    @app.get('/api/tag-completions')
+    def tag_completions(q:str='',limit:int=12):
+        return tag_completion.suggestions(q,limit)
 
     @app.get('/evaluation')
     def evaluation():
@@ -225,6 +235,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     @app.post('/api/pe/jobs')
     async def pe_submit(request:Request):
         if mock_gate is not None and pe_runner is None:raise HTTPException(403,'このテスト環境では補強を実行できません。')
+        store.vram.busy_guard()
         return pe.submit(await body(request))
 
     @app.get('/api/pe/jobs/{ident}')
@@ -233,6 +244,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     @app.post('/api/pe/jobs/{ident}/cancel')
     def pe_cancel(ident:str):return pe.cancel(ident)
 
+    @app.post('/api/comfy/session')
     @app.post('/api/qwen/session')
     async def qwen_selection(request:Request):
         p=await body(request);selected=p.get('selected');keep=p.get('keep',False)
@@ -241,17 +253,30 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         try:return await run_in_threadpool(comfy_backend.select_session,store,selected,keep)
         except httpx.HTTPError:raise ValueError('ComfyUIへモデル解放を要求できません。ComfyUIの起動・接続を確認してください。')
 
+    @app.get('/api/comfy/config')
     @app.get('/api/qwen/config')
-    def qwen_config():return comfy_backend.configuration(store)
+    def qwen_config(model:str=comfy_backend.DEFAULT_MODEL):return comfy_backend.configuration(store,model)
 
+    @app.post('/api/comfy/config')
     @app.post('/api/qwen/config')
     async def qwen_configure(request:Request):return comfy_backend.configure(store,await body(request))
 
     @app.post('/api/comfy/check')
-    async def comfy_check():return await run_in_threadpool(comfy_backend.check,store)
+    async def comfy_check(request:Request):
+        p=await body(request)
+        return await run_in_threadpool(comfy_backend.check,store,p.get('model',comfy_backend.DEFAULT_MODEL),p.get('url'))
 
     @app.post('/api/comfy/recover')
     async def comfy_recover():return await run_in_threadpool(comfy_backend.recover,store,worker)
+
+    @app.get('/api/vram/status')
+    async def vram_status():return await run_in_threadpool(store.vram.status)
+
+    @app.post('/api/vram/acquire')
+    def vram_acquire():return store.vram.start('acquire')
+
+    @app.post('/api/vram/release')
+    def vram_release():return store.vram.start('release')
 
     @app.get('/api/upscale/config')
     def upscale_config():return gpu.public_config()
@@ -271,7 +296,9 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     def upscale_job(ident:str):return gpu.public(gpu.get(ident))
 
     @app.post('/api/upscale/jobs')
-    async def upscale_submit(request:Request):return await run_in_threadpool(gpu.submit,await body(request))
+    async def upscale_submit(request:Request):
+        store.vram.busy_guard()
+        return await run_in_threadpool(gpu.submit,await body(request))
 
     @app.post('/api/upscale/jobs/{ident}/cancel')
     def upscale_cancel(ident:str):return gpu.cancel(ident)
@@ -285,7 +312,8 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         try: uuid.UUID(p['id'])
         except Exception: raise ValueError('ジョブIDが不正です。')
         if worker.health()['state']=='fault':raise HTTPException(503,'ワーカー障害中です。復旧後に登録を確認してください。')
-        if mock_gate is not None and p.get('provider')!='mock' and not (p.get('provider')=='qwen' and qwen_runner is not None):raise HTTPException(403,'テスト環境はモックのみです。')
+        if mock_gate is not None and p.get('provider')!='mock' and not (p.get('provider') in ('qwen','comfyui') and qwen_runner is not None):raise HTTPException(403,'テスト環境はモックのみです。')
+        if p.get('model') in comfy_backend.MODELS and store.vram.config()['enabled']:await run_in_threadpool(store.vram.status)
         return store.submit(p)
 
     def expose_job(job):
@@ -313,21 +341,25 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
 
     @app.post('/api/jobs/{ident}/cancel')
     def cancel(ident:str):
-        if store.job(ident)['params']['provider']=='qwen':return expose_job(qwen_backend.cancel(store,ident))
+        existing=store.job(ident)
+        if existing.get('local_machine',{}).get('backend')=='comfyui':return expose_job(comfy_backend.cancel(store,ident))
+        if existing['params']['provider']=='qwen':return expose_job(qwen_backend.cancel(store,ident))
         job=store.update_queued(ident,{'status':'cancelled','reserved':0,'message':'待機取消'})
         if job is None:raise ValueError('取消できるのは待機中だけです。送信済み処理の課金は取り消せません。')
         return job
 
     @app.post('/api/output-folder/open')
-    def open_output_folder():
+    async def open_output_folder(request:Request):
         if os.name!='nt':raise HTTPException(400,'フォルダーを開く操作はWindowsで利用できます。')
-        folder=Path(store.settings()['output']).expanduser().resolve()
+        p=await body(request)
+        category=store.output_category(p['id']) if p.get('id') else category_for_mode(p.get('mode','polish'))
+        folder=store.output_folder(category).resolve()
         try:
             folder.mkdir(parents=True,exist_ok=True)
             os.startfile(str(folder),'explore')
         except OSError:
             raise HTTPException(400,'保存先フォルダーを開けません。設定の保存先とアクセス権を確認してください。') from None
-        return {'path':str(folder)}
+        return {'path':str(folder),'category':category}
 
     @app.post('/api/export')
     async def export(request:Request): return {'path':store.export((await body(request))['id'])}
@@ -338,11 +370,24 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     @app.post('/api/settings')
     async def settings(request:Request):
         p=await body(request)
-        config={'limit_mode':p.get('limit_mode','notify'),'budget_period':p.get('budget_period','day'),'output':str(p['output']),'budget':float(p['budget']),'reservation':float(p['reservation']),'live':p['live'] is True}
+        current=store.settings()
+        config={'limit_mode':p.get('limit_mode','notify'),'budget_period':p.get('budget_period','day'),'output':str(p.get('output',current['output'])),'budget':float(p['budget']),'reservation':float(p['reservation']),'live':p['live'] is True}
+        for key in OUTPUT_FIELDS.values():
+            # Older clients still send just output; apply that common path to all categories.
+            fallback=config['output'] if 'output' in p and not any(k in p for k in OUTPUT_FIELDS.values()) else current[key]
+            config[key]=str(p.get(key,fallback))
+        config['strata']=strata_client.validate_settings(p.get('strata',current['strata']))
+        store.vram.settings_guard(config['strata'])
+        if config['strata']['enabled']:
+            devices=await run_in_threadpool(gpu_status.inventory)
+            selected=next((g for g in devices if not config['strata']['gpu_uuid'] or g['uuid']==config['strata']['gpu_uuid']),None) if len(devices)==1 else None
+            if selected and strata_client.target_mib(config['strata'])>selected['total_mib']:raise ValueError('目標空きVRAMが対象GPUの容量を超えています。')
         if any(not math.isfinite(config[k]) or config[k]<0 for k in ('budget','reservation')): raise ValueError('予算は0以上の数値で指定してください。')
         if config['limit_mode'] not in ('off','notify','stop') or config['budget_period'] not in ('day','month','all'):raise ValueError('料金管理の設定が不正です。')
         if config['limit_mode']=='stop' and (config['budget']<=0 or config['reservation']<=0):raise ValueError('停止上限と1枚の仮計上額は0より大きい値を指定してください。')
         if not Path(config['output']).is_absolute(): raise ValueError('保存先は絶対パスで指定してください。')
+        for category,key in OUTPUT_FIELDS.items():
+            if not Path(config[key]).is_absolute():raise ValueError(OUTPUT_LABELS[category]+'の保存先は絶対パスで指定してください。')
         store.set_settings(config); return config
 
     @app.get('/api/presets')

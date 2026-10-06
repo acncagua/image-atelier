@@ -1,0 +1,8 @@
+{
+  "Qwen-Image-2.1": {"family":"qwen", "clip_type":"qwen_image", "references":true, "max_images":10, "steps":40, "cfg":1, "latent":"EmptyLatentImage", "prompt_enhancement":true},
+  "FLUX.1-dev": {"family":"flux", "clip_type":"flux", "references":false, "max_images":1, "steps":20, "cfg":1, "latent":"EmptySD3LatentImage", "guidance":3.5},
+  "FLUX.1-schnell": {"family":"flux", "clip_type":"flux", "references":false, "max_images":1, "steps":4, "cfg":1, "latent":"EmptySD3LatentImage", "guidance":0},
+  "FLUX.1-Kontext-dev": {"family":"flux", "clip_type":"flux", "references":true, "max_images":1, "steps":20, "cfg":1, "latent":"EmptySD3LatentImage", "guidance":2.5},
+  "Anima": {"family":"anima", "clip_type":"stable_diffusion", "references":false, "max_images":1, "steps":30, "cfg":4, "latent":"EmptyLatentImage"},
+  "SDXL": {"family":"sdxl", "references":false, "max_images":1, "steps":30, "cfg":7, "latent":"EmptyLatentImage"}
+}

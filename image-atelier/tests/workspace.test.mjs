@@ -4,7 +4,32 @@ import test from 'node:test';
 import {Registration,writeRecord,readRecord,validateDraft,archiveDraft,listRecords} from '../src/workspace.js';
 import {recoverDraft,resolveDraftAssets} from '../src/draftValidation.js';
 import {readFileSync} from 'node:fs';
+import {tagContext,insertTag} from '../src/tagCompletion.js';
 import {upscalePlan,upscaleDefaults,restoreUpscaleOptions} from '../src/upscalePlan.js';
+
+test('tag completion replaces the tag around the caret and preserves later tags',()=>{
+ const text='1girl, blu_hair, smile',caret=text.indexOf('blu')+3;
+ const context=tagContext(text,caret);assert.equal(context.query,'blu');
+ const completed=insertTag(text,context,'blue_hair');assert.equal(completed.value,'1girl, blue hair, smile');assert.equal(completed.caret,completed.value.indexOf('smile'));
+ const ending='long h';assert.equal(insertTag(ending,tagContext(ending,ending.length),'long_hair').value,'long hair, ');
+ const newline='long h\nsmile';assert.equal(insertTag(newline,tagContext(newline,6),'long_hair').value,'long hair\nsmile');
+});
+
+test('tag completion keeps attention weights and escapes tag-name parentheses',()=>{
+ const weighted='1girl, (long h:1.2), smile';
+ const result=insertTag(weighted,tagContext(weighted,weighted.indexOf(':')),'long_hair');assert.equal(result.value,'1girl, (long hair:1.2), smile');
+ const final='(long h:1.2)';assert.equal(insertTag(final,tagContext(final,7),'long_hair').value,'(long hair:1.2), ');
+ const unfinished='(long h';assert.equal(insertTag(unfinished,tagContext(unfinished,unfinished.length),'long_hair').value,'(long hair');
+ assert.equal(insertTag('miku',tagContext('miku',4),'hatsune_miku_(vocaloid)').value,'hatsune miku \\(vocaloid\\), ');
+ assert.equal(tagContext(weighted,weighted.indexOf(':')+2),null);
+});
+
+test('tag completion ignores selected text, short input, Japanese and network/wildcard syntax',()=>{
+ for(const text of ['x','日本語','<lora:test','__wildcard',''])assert.equal(tagContext(text,text.length),null);
+ assert.equal(tagContext('long hair',2,5),null);
+ assert.equal(tagContext('1girl, ',7),null);
+ assert.equal(tagContext('1girl,  long h',14).query,'long h');
+});
 
 test('frozen registration survives editing and lost acknowledgement without extra job',async()=>{
  const accepted=new Map();let submits=0;let lose=true;
@@ -262,4 +287,41 @@ test('reference-sheet role and opt-in survive draft restoration',()=>{
  const restored=recoverDraft(saved,{reference_sheets:false});
  assert.equal(restored.payload.p.reference_sheets,true);
  assert.equal(restored.payload.refs[0].role,'reference');
+});
+
+
+test('local model switches use selected defaults and preserve recoverable references', async()=>{
+ const {localModels,selectLocalModel,supportsReferences}=await import('../src/localModels.js');
+ for(const [model,spec] of Object.entries(localModels)){
+  const selected=selectLocalModel({...qwenDefaults,mode:'inpaint',model:'Qwen-Image-2.1'},model);
+  assert.equal(selected.qwen_cfg,spec.cfg);
+  assert.equal(selected.qwen_steps,spec.steps);
+  assert.equal(selected.composite,true);
+  assert.equal(supportsReferences(model),spec.references);
+  assert.equal(referenceLimit({...selected,mode:'generate'}),spec.references?spec.max_images:0);
+ }
+ assert.equal(referenceLimit({model:'FLUX.1-Kontext-dev',mode:'polish'}),0);
+});
+
+test('SDXL defaults and Hires geometry survive draft restoration',async()=>{
+ const {selectLocalModel,localDefaults,localOutputSize}=await import('../src/localModels.js');
+ const selected=selectLocalModel({...qwenDefaults,...localDefaults,provider:'comfyui',quality:'medium',model:'Anima',mode:'generate',width:512,height:512},'SDXL');
+ assert.equal(selected.clip_skip,2);assert.equal(selected.denoise,.7);assert.equal(selected.qwen_cfg,7);assert.equal(qwenProblem(selected),'');
+ const p={...selected,hires_fix:true,hires_scale:1.5,hires_steps:10,hires_upscaler:'model:4x-UltraSharp.pth',inpaint_area:'masked',inpaint_padding:64,sampler:'euler',scheduler:'normal'};
+ const restored=recoverDraft({p,refs:[],strokes:[],redo:[]},selected).payload.p;
+ assert.deepEqual(restored,p);assert.deepEqual(localOutputSize(restored),[768,768]);
+ assert.deepEqual(localOutputSize({...restored,mode:'inpaint'},{width:641,height:479}),[641,479]);
+ assert.equal(qwenProblem({...restored,mode:'inpaint'},{width:641,height:479}),'');
+ assert.ok(qwenProblem({...restored,qwen_cfg:31}));assert.ok(qwenProblem({...restored,width:2048,hires_scale:4}));
+});
+
+test('SDXL edit modes ignore restored Hires flags and oversized second-pass settings',async()=>{
+ const {selectLocalModel,localDefaults,localOutputSize,sdxlHiresEnabled}=await import('../src/localModels.js');
+ const base=selectLocalModel({...qwenDefaults,...localDefaults,width:2048,height:1024,mode:'generate'},'SDXL');
+ const old={...base,hires_fix:true,hires_scale:4,hires_steps:200};
+ for(const mode of ['polish','inpaint']){
+  const p={...old,mode};assert.equal(sdxlHiresEnabled(p),false);assert.deepEqual(localOutputSize(p),[2048,1024]);assert.equal(qwenProblem(p),'');
+ }
+ assert.deepEqual(localOutputSize({...old,mode:'inpaint',inpaint_area:'masked'},{width:641,height:479}),[641,479]);
+ assert.equal(sdxlHiresEnabled(old),true);assert.ok(qwenProblem(old));
 });

@@ -21,7 +21,7 @@ class QwenJobs(unittest.TestCase):
         p=self.params();job=self.s.submit(p)
         with patch('core.real_request',side_effect=AssertionError('no API')),patch('core.mock_request',side_effect=AssertionError('not API mock')):Worker(self.s).run(job['id'])
         job=self.s.job(job['id']);self.assertEqual(job['status'],'completed');self.assertEqual(job['reserved'],0)
-        self.assertEqual(job['outputs'][0]['name'],'Qwen出力');self.assertEqual(job['outputs'][0]['width'],512)
+        self.assertEqual(job['outputs'][0]['name'],job['params']['model']+'出力');self.assertEqual(job['outputs'][0]['width'],512)
         self.assertIn('Qwen',job['message'])
     def test_reference_generation_is_not_source_editing(self):
         from PIL import Image

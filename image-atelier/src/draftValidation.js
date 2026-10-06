@@ -1,3 +1,4 @@
+import {localModels} from './localModels.js';
 // Keep recoverable text while rejecting shapes that would break the editor.
 export function recoverDraft(saved,defaults){
  const warnings=[];
@@ -8,7 +9,7 @@ export function recoverDraft(saved,defaults){
   if(typeof value!==typeof defaults[key]||(typeof value==='number'&&!Number.isFinite(value))){warnings.push('不正な設定 '+key+' を既定値で表示します。');continue;}
   payload.p[key]=value;
  }
- for(const [key,allowed] of Object.entries({mode:['generate','polish','inpaint','upscale'],provider:['mock','openai','qwen'],model:['gpt-image-2.5-sunburst','gpt-image-2.5-flare','Qwen-Image-2.1'],quality:['low','medium','high','xhigh','max','auto'],format:['png','jpeg','webp']})){
+ for(const [key,allowed] of Object.entries({mode:['generate','polish','inpaint','upscale'],provider:['mock','openai','qwen','comfyui'],model:['gpt-image-2.5-sunburst','gpt-image-2.5-flare',...Object.keys(localModels)],quality:['low','medium','high','xhigh','max','auto'],format:['png','jpeg','webp']})){
   if(!allowed.includes(payload.p[key])){warnings.push('未対応の設定 '+key+' を原データに保持しました。');payload.p[key]=defaults[key];}
  }
  const validStroke=s=>s&&Number.isFinite(s.width)&&s.width>0&&Array.isArray(s.points)&&s.points.every(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));

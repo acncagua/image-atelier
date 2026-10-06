@@ -1,11 +1,12 @@
 import React from 'react';
 import {instructionPresets,presetText,composeInstructions} from './instructionPresets';
+import TagTextarea from './TagTextarea';
 
-export default function InstructionEditor({kind,value,onChange,title:customTitle,referenceEnabled=false,onReferenceChange}){
+export default function InstructionEditor({kind,value,onChange,title:customTitle,referenceEnabled=false,onReferenceChange,tagCompletion=false}){
  const title=customTitle||(kind==='change'?'変更すること':'維持すること');
  function toggle(id,checked){onChange({...value,selected:checked?[...value.selected,id]:value.selected.filter(x=>x!==id)});}
  return <fieldset className="instruction-editor"><legend>{title}</legend>
-  <label className="field">{title}：追加指示（手入力）<textarea value={value.extra} placeholder="プリセット以外の指示を追加できます" onChange={e=>onChange({...value,extra:e.target.value})}/></label>
+  <label className="field">{title}：追加指示（手入力）<TagTextarea enabled={tagCompletion} aria-label={title+'：追加指示（手入力）'} value={value.extra} placeholder="プリセット以外の指示を追加できます" onChange={text=>onChange({...value,extra:text})}/></label>
   <details><summary>プリセットを選択（複数可・{value.selected.length+(referenceEnabled?1:0)}件選択）</summary>
    <div className="instruction-choices">{instructionPresets[kind].map(preset=><label key={preset[0]} title={presetText(preset,value.values)}>
     <input type="checkbox" checked={value.selected.includes(preset[0])} onChange={e=>toggle(preset[0],e.target.checked)}/>{preset[1]}

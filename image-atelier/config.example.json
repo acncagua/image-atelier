@@ -4,5 +4,6 @@
   "budget": 0,
   "reservation": 1,
   "live": false,
-  "openai_api_key": ""
+  "openai_api_key": "",
+  "strata_api_key": ""
 }

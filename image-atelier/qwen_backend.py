@@ -68,7 +68,7 @@ def recover(store):
     import qwen_session
     qwen_session.recover(store)
     for job in store.jobs():
-        if job['params']['provider']!='qwen':continue
+        if job['params']['provider'] not in ('qwen','comfyui'):continue
         if job.get('local_machine',{}).get('backend')=='comfyui':
             if job['status'] in ('sending','queued'):
                 job.update(status='unknown' if job.get('comfy_prompt_id') else 'failed',message='ComfyUIの中断ジョブを照合してください。自動再送はしません。');store.save_job(job)

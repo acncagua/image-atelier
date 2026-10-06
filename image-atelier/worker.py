@@ -8,8 +8,10 @@ from pathlib import Path
 import httpx
 import core
 import qwen_backend
+import comfy_backend
 from persistence import atomic_write
 from imaging import normalize, png, mask_image, api_mask, composite
+from output_paths import category_for_mode
 
 
 class Worker:
@@ -72,8 +74,8 @@ class Worker:
                 if job['status']!='queued':return
                 self.current=ident
                 p=job['params']
-                if p['provider']=='qwen':
-                    qwen_backend.run(self,ident)
+                if p['provider'] in ('qwen','comfyui'):
+                    (comfy_backend if job.get('local_machine',{}).get('backend')=='comfyui' else qwen_backend).run(self,ident)
                     return
                 # All local preparation happens before the durable sending marker.
                 try:
@@ -182,17 +184,22 @@ class Worker:
                 if legacy and 'raw' not in record and index<len(raw_old):record['raw']=raw_old[index]
                 if 'raw' not in record:
                     content=base64.b64decode(encoded,validate=True)
-                    record['raw']=s.asset(content,'Qwen出力' if p['provider']=='qwen' else 'API生出力' if p['provider']=='openai' else 'モック出力',p.get('target'),'raw',identity=f'{ident}:raw:{index}')
+                    record['raw']=s.asset(content,p['model']+'出力' if p['provider'] in ('qwen','comfyui') else 'API生出力' if p['provider']=='openai' else 'モック出力',p.get('target'),'raw',identity=f'{ident}:raw:{index}',output_category=category_for_mode(p['mode']))
                 result=record['raw'];s.file(result['id'])
                 outputs.append(result)
-                if (result['width'],result['height'])!=(p['width'],p['height']):warnings.append('要求寸法と実寸法が異なります。')
-                if p['mode']=='inpaint' and p.get('composite'):
+                if (result['width'],result['height'])!=core.local_models.output_size(p):warnings.append('要求寸法と実寸法が異なります。')
+                # Only masked has already been feathered and pasted into the source.
+                already_composited=p['model']=='SDXL' and p.get('inpaint_area')=='masked'
+                if p['mode']=='inpaint' and p.get('composite') and not already_composited:
                     if legacy and 'composite' not in record and index<len(composite_old):record['composite']=composite_old[index]
                     if 'composite' not in record:
                         original=normalize(s.file(p['target']).read_bytes())
                         mask=mask_image(original.size,p['strokes'])
+                        if p['model']=='SDXL':
+                            from sdxl_backend import composite_source
+                            original,mask=composite_source(s,p,(result['width'],result['height']))
                         merged=composite(original,normalize(s.file(result['id']).read_bytes()),mask,p['feather'])
-                        record['composite']=s.asset(png(merged),'局所合成',p['target'],'composite',identity=f'{ident}:composite:{index}')
+                        record['composite']=s.asset(png(merged),'局所合成',p['target'],'composite',identity=f'{ident}:composite:{index}',output_category=category_for_mode(p['mode']))
                     outputs.append(record['composite'])
                 record.pop('error',None)
             except Exception as error:
@@ -214,7 +221,7 @@ class Worker:
             except OSError:errors.append('保存先に書き込めません。PNGダウンロードで回収し、再処理で書き出しを再試行できます。')
         job.update(saved_paths=list(exported.values()),status='local_error' if errors else 'completed',
                    phase='local_processing_failed' if errors else 'exported',local_errors=errors,
-                   message=' / '.join(errors+warnings) or ('Qwenローカル処理が完了しました。' if p['provider']=='qwen' else '完了' if p['provider']=='openai' else 'モック処理が完了しました。画質評価には使えません。'))
+                   message=' / '.join(errors+warnings) or (p['model']+'のローカル処理が完了しました。' if p['provider'] in ('qwen','comfyui') else '完了' if p['provider']=='openai' else 'モック処理が完了しました。画質評価には使えません。'))
         if len(items)!=p.get('n',1):job['message']+=' / 要求枚数と取得枚数が異なります。'
         if exported:job['saved_path']=list(exported.values())[-1]
         if not self.persist(job):raise OSError('State persistence failed')

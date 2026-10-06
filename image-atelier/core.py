@@ -1,5 +1,7 @@
 from billing import usage_summary
-import qwen_backend
+import local_models
+from output_paths import FIELDS as OUTPUT_FIELDS,category_for_mode
+from strata_client import DEFAULTS as STRATA_DEFAULTS
 import qwen_session
 import copy
 import base64
@@ -51,7 +53,7 @@ def reference_instructions(p):
 
 def prompt_for(p):
     extra=reference_instructions(p)
-    if p.get('model')==qwen_backend.MODEL:
+    if local_models.is_local(p.get('model')):
         return '\n\n'.join([p.get('change',''),*extra]).strip() if extra else p.get('change','')
     lines=['モード: '+p['mode']];index=1
     if p.get('target') and p['mode']!='generate':
@@ -90,8 +92,9 @@ def canonical_input(p):
     result['refs']=[{'id':r['id'],'role':r['role'],'person':r.get('person','')} for r in result['refs']]
     result['strokes']=[{'width':float(r['width']),'erase':bool(r.get('erase',False)),
                        'points':[[float(x),float(y)] for x,y in r['points']]} for r in result['strokes']]
-    if result['model']==qwen_backend.MODEL:
-        result.update({k:copy.deepcopy(p.get(k,v)) for k,v in qwen_backend.DEFAULTS.items()})
+    if local_models.is_local(result['model']):
+        result.update({k:copy.deepcopy(p.get(k,v)) for k,v in local_models.defaults_for(result['model']).items()})
+        if result['model']=='SDXL' and result['mode']!='generate':result['hires_fix']=False
         if p.get('pe_job_id'):result['pe_job_id']=safe_id(p['pe_job_id'])
     if type(p.get('reference_sheets',False)) is not bool:raise ValueError('リファレンス指定が不正です。')
     if p.get('reference_sheets'):result['reference_sheets']=True
@@ -116,18 +119,23 @@ class Store:
         self.db.executescript('CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, meta TEXT); CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, fingerprint TEXT, body TEXT); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, body TEXT);')
         self.db.commit()
         migrate(self)
+        from vram_manager import VRAMManager
+        self.vram=VRAMManager(self)
 
     def settings(self):
         with self.lock:
             row = self.db.execute("SELECT body FROM settings WHERE id='config'").fetchone()
-        return {'output':str(ROOT/'output'),'budget':5,'reservation':0.5,'live':False,'limit_mode':'notify','budget_period':'day',**(json.loads(row[0]) if row else {})}
+        settings={'output':str(ROOT/'output'),'budget':5,'reservation':0.5,'live':False,'limit_mode':'notify','budget_period':'day',**(json.loads(row[0]) if row else {})}
+        for key in OUTPUT_FIELDS.values():settings.setdefault(key,settings['output'])
+        settings['strata']={**STRATA_DEFAULTS,**settings.get('strata',{})}
+        return settings
 
     def set_settings(self, data):
         with self.lock:
             self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('config',json.dumps(data)))
             self.db.commit()
 
-    def asset(self, raw, name='image', parent=None, kind='input', identity=None, operation=None):
+    def asset(self, raw, name='image', parent=None, kind='input', identity=None, operation=None, output_category=None):
         if kind == 'input' and len(raw) > CAP['max_file_bytes']:
             raise ValueError('ファイルは20MB以下にしてください。')
         ident=uuid.uuid5(uuid.NAMESPACE_URL,identity).hex if identity else uuid.uuid4().hex
@@ -142,6 +150,9 @@ class Store:
             atomic_write(folder/'image.png',png(image))
             meta={'id':ident,'name':name[:240],'width':image.width,'height':image.height,
                   'parent':parent,'kind':kind,'sha256':hashlib.sha256(raw).hexdigest()}
+            if output_category is not None:
+                if output_category not in OUTPUT_FIELDS:raise ValueError('保存先の区分が不正です。')
+                meta['output_category']=output_category
             with self.lock, self.db:
                 self.db.execute('INSERT INTO assets VALUES (?,?)',(ident,json.dumps(meta)))
                 if operation is not None:
@@ -230,12 +241,12 @@ class Store:
                 if fingerprint(job['params'])!=fingerprint(p):
                     raise JobConflict('同じジョブIDで異なる入力は登録できません。新しく実行する場合は新しいIDが必要です。')
                 return job
-            is_qwen=p['model']==qwen_backend.MODEL or p['provider']=='qwen'
-            if is_qwen:qwen_backend.validate(p)
+            is_local=local_models.is_local(p['model']) or p['provider'] in ('qwen','comfyui')
+            if is_local:local_models.validate(p)
             else:validate_size(p['width'],p['height'])
-            if not is_qwen and (p['model'] not in CAP['models'] or p['quality'] not in CAP['models'][p['model']]['qualities']):
+            if not is_local and (p['model'] not in CAP['models'] or p['quality'] not in CAP['models'][p['model']]['qualities']):
                 raise ValueError('未対応モデル・品質です。別モデルへの自動切替はしません。')
-            if p['mode'] not in ('generate','polish','inpaint') or p['provider'] not in ('mock','openai','qwen'):
+            if p['mode'] not in ('generate','polish','inpaint') or p['provider'] not in ('mock','openai','qwen','comfyui'):
                 raise ValueError('モード・接続方式が不正です。')
             if type(p.get('n',1)) is not int or not 1<=p.get('n',1)<=4 or p.get('format','png') not in ('png','jpeg','webp'):
                 raise ValueError('生成枚数は1〜4枚、出力形式はPNG・JPEG・WebPから選んでください。')
@@ -250,8 +261,8 @@ class Store:
             for ref in p.get('refs',[]):
                 if ref['role'] not in ROLES: raise ValueError('資料の役割が不正です。')
                 self.meta(ref['id']); ids.append(ref['id'])
-            if is_qwen:
-                if len(ids)+(1 if p['mode']=='inpaint' else 0)>10:raise ValueError('Qwenの画像入力は元画像・参照資料・部分修正マスクの合計10枚までです。')
+            if is_local:
+                local_models.validate_inputs(p,ids)
             elif len(ids)>CAP['max_images']:raise ValueError('画像は編集対象を含め8枚までです（初期版の制限）。')
             p['input_ids']=ids
             for ident in ids:
@@ -260,7 +271,7 @@ class Store:
             if p['mode']=='inpaint':
                 m=self.meta(p['target']); mask=mask_image((m['width'],m['height']),p.get('strokes',[]))
                 if not mask.getbbox(): raise ValueError('変更したい範囲をマスクで塗ってください。')
-                if is_qwen and (p['width'],p['height'])!=(m['width'],m['height']):raise ValueError('Qwen部分修正では出力寸法を元画像と同じにしてください。32の倍数でない元画像は先に余白追加で調整してください。')
+                if is_local and p['model']!='SDXL' and (p['width'],p['height'])!=(m['width'],m['height']):raise ValueError('ローカル部分修正では出力寸法を元画像と同じにしてください。32の倍数でない元画像は先に余白追加で調整してください。')
             digest=fingerprint(p)
             settings=self.settings()
             reserved=0
@@ -273,13 +284,11 @@ class Store:
                     if reserved<=0 or accounted+reserved>settings['budget']:
                         raise ValueError('Atelierで設定した利用上限に達するため登録できません。設定の制限方法・金額を確認してください。OpenAIの残高不足ではありません。')
             job={'id':p['id'],'fingerprint':digest,'params':p,'status':'queued','created':datetime.now(timezone.utc).isoformat(),'reserved':reserved,'estimate':None,'message':'待機中','outputs':[]}
-            if is_qwen:
-                machine=qwen_backend.configuration(self)
-                if machine.get('backend')=='comfyui':
-                    if any(not machine.get(k) for k in ('diffusion','text_encoder','vae')):raise ValueError('ComfyUIの生成モデル・テキストエンコーダー・VAEを選択してください。')
-                    if p.get('qwen_timing'):raise ValueError('ComfyUI版のステップ別時間計測は未対応です。時間計測を解除してください。')
-                elif not Path(machine['python']).is_file() or not (Path(machine['model'])/'model_index.json').is_file():raise ValueError('Qwen専用Pythonまたはモデルが未設定です。Qwen環境設定を確認してください。')
+            if is_local:
+                machine=local_models.ready_configuration(self,p)
+                if machine.get('backend')=='comfyui':self.vram.registration_guard()
                 job['local_machine']=machine
+                if p['model']=='SDXL':job['comfy_models']={k:machine.get(k,'') for k in ('checkpoint','vae','hires_checkpoint')}
                 if p.get('pe_job_id'):
                     from pe_jobs import read_record,input_context
                     enhancement=read_record(self,p['pe_job_id'])
@@ -291,10 +300,27 @@ class Store:
             self.db.commit()
             return job
 
-    def export(self, ident, operation=None):
+    def output_category(self,ident):
+        seen=set();jobs=None
+        while ident and ident not in seen:
+            seen.add(ident);meta=self.meta(ident)
+            if meta.get('kind')=='upscaled':return 'upscale'
+            if meta.get('output_category') in OUTPUT_FIELDS:return meta['output_category']
+            # Old assets have no category tag; recover it from their recorded job.
+            if jobs is None:jobs=self.jobs()
+            for job in jobs:
+                if any(o['id']==ident for o in job.get('outputs',[])):return category_for_mode(job['params']['mode'])
+            ident=meta.get('parent')
+        return 'i2i'
+
+    def output_folder(self,category):
+        if category not in OUTPUT_FIELDS:raise ValueError('保存先の区分が不正です。')
+        return Path(self.settings()[OUTPUT_FIELDS[category]]).expanduser()
+
+    def export(self, ident, operation=None, category=None):
         source=self.file(ident)
         content=source.read_bytes()
-        folder=Path(self.settings()['output']).expanduser()
+        folder=self.output_folder(category or self.output_category(ident))
         folder.mkdir(parents=True,exist_ok=True)
         dest=folder/(f"atelier_{operation}.png" if operation else f"atelier_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:12]}.png")
         digest=hashlib.sha256(content).hexdigest()[:16]

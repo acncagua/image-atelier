@@ -96,6 +96,40 @@ class Comfy(unittest.TestCase):
             with self.assertRaises(ValueError):c.validate_models(client,config)
         self.assertFalse(any(path=='/prompt' for _,path,_ in self.calls))
 
+    def test_check_reports_version_but_stats_are_optional(self):
+        for stats,expected in ((httpx.Response(200,json={'system':{'comfyui_version':'0.38.0'}}),'0.38.0'),(httpx.Response(404),None),(httpx.Response(200,json={'system':None}),None),(httpx.Response(200,content=b'invalid JSON'),None)):
+            with self.subTest(stats=stats):
+                def handler(request):
+                    return stats if request.url.path=='/system_stats' else self.handler(request)
+                def connection(config):
+                    return httpx.Client(base_url=config['url'],transport=httpx.MockTransport(handler))
+                with patch.object(c,'client',connection):result=c.check(self.s)
+                self.assertEqual(result['missing'],[])
+                self.assertEqual(result['comfyui_version'],expected)
+
+    def test_v038_tiny_vae_discovery_generation_and_reference_workflow(self):
+        config={**self.config,'vae':'taeqi2_1'}
+        def handler(request):
+            if request.url.path=='/object_info':
+                info=self.handler(request).json()
+                info['VAELoader']['input']['required']['vae_name'][0].extend(['taeqi2_1','taesd','taef1','taef2'])
+                return httpx.Response(200,json=info)
+            return self.handler(request)
+        def connection(config):return httpx.Client(base_url=config['url'],transport=httpx.MockTransport(handler))
+        with connection(config) as client:
+            self.assertEqual(c.inspect(client)['vae'],['qwen21vae.safetensors','taeqi2_1'])
+            c.validate_models(client,config,self.params(input_ids=[]))
+        c.configure(self.s,config)
+        job=self.s.submit(self.params())
+        with patch.object(c,'client',connection):Worker(self.s).run(job['id'])
+        self.assertEqual(self.s.job(job['id'])['status'],'completed')
+        self.assertEqual(self.graph['3']['inputs']['vae_name'],'taeqi2_1')
+        graph=c.workflow(self.params(),config,42,['base','ref','mask'],'tiny')
+        self.assertEqual(graph['4']['inputs']['vae'],['3',0])
+        self.assertEqual(graph['4']['inputs']['images.image_3'],['103',0])
+        for model in ('Anima','FLUX.1-dev'):
+            self.assertFalse(c.compatible(model,'vae','taeqi2_1'))
+
     def test_error_history_without_completed_flag_is_not_polled_forever(self):
         job={'comfy_prompt_id':'id'}
         with self.assertRaises(RuntimeError):

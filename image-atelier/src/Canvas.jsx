@@ -3,9 +3,23 @@ import {imageURL} from './api';
 
 export function pixelPoint(event,rect,width,height){return [(event.clientX-rect.left)*width/rect.width,(event.clientY-rect.top)*height/rect.height];}
 
-export default function Canvas({asset,strokes=[],setStrokes,tool='pan',brush=40,zoom,setZoom,pan,setPan,onCrop,onOpen,label}){
+// Each asset owns its bitmap and pending load. Never reuse the previous canvas
+// while a replacement is loading (including same-sized generated images).
+export default function Canvas(props){
+ return <AssetCanvas key={props.asset?.id||'empty'} {...props}/>;
+}
+
+function AssetCanvas({asset,strokes=[],setStrokes,tool='pan',brush=40,zoom,setZoom,pan,setPan,onCrop,onOpen,label}){
  const canvas=useRef(null),host=useRef(null),drag=useRef(null),[image,setImage]=useState(null),[fit,setFit]=useState(1),[selection,setSelection]=useState(null);
- useEffect(()=>{setImage(null);if(!asset)return;const i=new Image();i.onload=()=>setImage(i);i.src=imageURL(asset.id);return()=>{i.onload=null;};},[asset?.id]);
+ const [loadError,setLoadError]=useState(false),[attempt,setAttempt]=useState(0);
+ useEffect(()=>{
+  setImage(null);setLoadError(false);if(!asset)return;
+  let active=true;const i=new Image();
+  i.onload=()=>{if(active)setImage(i);};
+  i.onerror=()=>{if(active)setLoadError(true);};
+  i.src=imageURL(asset.id)+(attempt?'?retry='+attempt:'');
+  return()=>{active=false;i.onload=null;i.onerror=null;};
+ },[asset?.id,attempt]);
  useEffect(()=>{const obs=new ResizeObserver(([e])=>{if(asset)setFit(Math.min((e.contentRect.width-24)/asset.width,(e.contentRect.height-24)/asset.height,1));});if(host.current)obs.observe(host.current);return()=>obs.disconnect();},[asset]);
  const scale=zoom===0?fit:zoom;
  // React's delegated wheel listener may be passive. Attach directly so that
@@ -28,5 +42,5 @@ export default function Canvas({asset,strokes=[],setStrokes,tool='pan',brush=40,
  function move(e){const d=drag.current;if(!d)return;if(tool==='pan'){setPan([d.pan[0]+e.clientX-d.screen[0],d.pan[1]+e.clientY-d.screen[1]]);return;}const pt=point(e);if(d.stroke){d.stroke={...d.stroke,points:[...d.stroke.points,pt]};setStrokes(prev=>[...prev.slice(0,-1),d.stroke]);}if(tool==='crop')setSelection({x:Math.round(Math.min(d.point[0],pt[0])),y:Math.round(Math.min(d.point[1],pt[1])),w:Math.floor(Math.abs(pt[0]-d.point[0])),h:Math.floor(Math.abs(pt[1]-d.point[1]))});}
  function up(e){const d=drag.current;drag.current=null;if(onOpen&&d&&d.onImage&&Math.hypot(e.clientX-d.screen[0],e.clientY-d.screen[1])<4)onOpen();if(tool==='crop'&&selection?.w>0&&selection?.h>0){onCrop(selection);setSelection(null);}}
  return <section className="image-panel"><h2>{label}<span>{asset?`${asset.width} × ${asset.height}`:''}</span></h2><div className={'viewport tool-'+tool} ref={host} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={()=>{drag.current=null;}}>
- {asset?<canvas ref={canvas} role={onOpen?'button':undefined} tabIndex={onOpen?0:undefined} aria-label={onOpen?'結果画像を大きく表示':undefined} onKeyDown={e=>{if(onOpen&&(e.key==='Enter'||e.key===' ')){e.preventDefault();onOpen();}}} style={{width:asset.width*scale,height:asset.height*scale,transform:`translate(${pan[0]}px,${pan[1]}px)`}}/>:<div className="empty">ここに{label==='元画像'?'元画像':'結果画像'}が表示されます<span>{label==='元画像'?'左のパネルから画像を読み込んでください':'実行後の画像を比較できます'}</span></div>}</div><div className="image-footer"><button onClick={()=>setZoom(Math.max(.05,scale/1.25))}>縮小</button><button onClick={()=>setZoom(Math.min(8,scale*1.25))}>拡大</button><button onClick={()=>{setZoom(0);setPan([0,0]);}}>画面に合わせる</button><button onClick={()=>setZoom(1)}>100%</button><small>{Math.round(scale*100)}%</small></div></section>;
+ {asset&&image?<canvas ref={canvas} role={onOpen?'button':undefined} tabIndex={onOpen?0:undefined} aria-label={onOpen?'結果画像を大きく表示':undefined} onKeyDown={e=>{if(onOpen&&(e.key==='Enter'||e.key===' ')){e.preventDefault();onOpen();}}} style={{width:asset.width*scale,height:asset.height*scale,transform:`translate(${pan[0]}px,${pan[1]}px)`}}/>:asset?<div className="empty" role={loadError?'alert':'status'}>{loadError?<>画像を読み込めませんでした<button onClick={()=>setAttempt(n=>n+1)}>再読み込み</button></>:'画像を読み込み中…'}</div>:<div className="empty">ここに{label==='元画像'?'元画像':'結果画像'}が表示されます<span>{label==='元画像'?'左のパネルから画像を読み込んでください':'実行後の画像を比較できます'}</span></div>}</div><div className="image-footer"><button onClick={()=>setZoom(Math.max(.05,scale/1.25))}>縮小</button><button onClick={()=>setZoom(Math.min(8,scale*1.25))}>拡大</button><button onClick={()=>{setZoom(0);setPan([0,0]);}}>画面に合わせる</button><button onClick={()=>setZoom(1)}>100%</button><small>{Math.round(scale*100)}%</small></div></section>;
 }
