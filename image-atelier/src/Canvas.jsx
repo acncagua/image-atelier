@@ -1,5 +1,6 @@
 import React,{useRef,useEffect,useState} from 'react';
 import {imageURL} from './api';
+import {drawStroke} from './sketch';
 
 export function pixelPoint(event,rect,width,height){return [(event.clientX-rect.left)*width/rect.width,(event.clientY-rect.top)*height/rect.height];}
 
@@ -9,7 +10,7 @@ export default function Canvas(props){
  return <AssetCanvas key={props.asset?.id||'empty'} {...props}/>;
 }
 
-function AssetCanvas({asset,strokes=[],setStrokes,tool='pan',brush=40,zoom,setZoom,pan,setPan,onCrop,onOpen,label}){
+function AssetCanvas({asset,strokes=[],setStrokes,tool='pan',brush=40,sketch=false,color='#ff0000',opacity=1,zoom,setZoom,pan,setPan,onCrop,onOpen,label}){
  const canvas=useRef(null),host=useRef(null),drag=useRef(null),[image,setImage]=useState(null),[fit,setFit]=useState(1),[selection,setSelection]=useState(null);
  const [loadError,setLoadError]=useState(false),[attempt,setAttempt]=useState(0);
  useEffect(()=>{
@@ -33,12 +34,13 @@ function AssetCanvas({asset,strokes=[],setStrokes,tool='pan',brush=40,zoom,setZo
 
  useEffect(()=>{const c=canvas.current;if(!c||!image||!asset)return;c.width=asset.width;c.height=asset.height;const ctx=c.getContext('2d');ctx.drawImage(image,0,0);
   const mask=document.createElement('canvas');mask.width=c.width;mask.height=c.height;const m=mask.getContext('2d');
-  for(const s of strokes){m.globalCompositeOperation=s.erase?'destination-out':'source-over';m.strokeStyle='#0ca7b3';m.fillStyle='#0ca7b3';m.lineWidth=s.width;m.lineCap='round';m.lineJoin='round';m.beginPath();s.points.forEach(([x,y],i)=>i?m.lineTo(x,y):m.moveTo(x,y));m.stroke();for(const [x,y]of s.points){m.beginPath();m.arc(x,y,s.width/2,0,Math.PI*2);m.fill();}}
-  ctx.globalAlpha=.4;ctx.drawImage(mask,0,0);ctx.globalAlpha=1;
+  const strokeLayer=document.createElement('canvas');strokeLayer.width=c.width;strokeLayer.height=c.height;const sc=strokeLayer.getContext('2d');
+  for(const s of strokes){sc.clearRect(0,0,c.width,c.height);drawStroke(sc,s,sketch?(s.color||color):'#0ca7b3');m.globalCompositeOperation=s.erase?'destination-out':'source-over';m.globalAlpha=s.erase?1:sketch?(s.opacity??opacity):1;m.drawImage(strokeLayer,0,0);}
+  ctx.globalAlpha=sketch?1:.4;ctx.drawImage(mask,0,0);ctx.globalAlpha=1;
   if(selection){ctx.strokeStyle='#08a3ac';ctx.lineWidth=2/scale;ctx.strokeRect(selection.x,selection.y,selection.w,selection.h);}
- },[image,asset,strokes,selection,scale]);
+ },[image,asset,strokes,selection,scale,sketch,color,opacity]);
  function point(e){return pixelPoint(e,canvas.current.getBoundingClientRect(),asset.width,asset.height).map((v,i)=>Math.max(0,Math.min(v,i?asset.height:asset.width)));}
- function down(e){if(!asset||!image)return;e.currentTarget.setPointerCapture(e.pointerId);const pt=point(e);drag.current={onImage:e.target.tagName==='CANVAS',point:pt,screen:[e.clientX,e.clientY],pan:[...pan]};if(tool==='brush'||tool==='erase'){const s={width:+brush,erase:tool==='erase',points:[pt]};drag.current.stroke=s;setStrokes([...strokes,s]);}if(tool==='crop')setSelection({x:pt[0],y:pt[1],w:0,h:0});}
+ function down(e){if(!asset||!image)return;e.currentTarget.setPointerCapture(e.pointerId);const pt=point(e);drag.current={onImage:e.target.tagName==='CANVAS',point:pt,screen:[e.clientX,e.clientY],pan:[...pan]};if(tool==='brush'||tool==='erase'){const s={width:+brush,erase:tool==='erase',points:[pt],...(sketch?{color,opacity}:{})};drag.current.stroke=s;setStrokes([...strokes,s]);}if(tool==='crop')setSelection({x:pt[0],y:pt[1],w:0,h:0});}
  function move(e){const d=drag.current;if(!d)return;if(tool==='pan'){setPan([d.pan[0]+e.clientX-d.screen[0],d.pan[1]+e.clientY-d.screen[1]]);return;}const pt=point(e);if(d.stroke){d.stroke={...d.stroke,points:[...d.stroke.points,pt]};setStrokes(prev=>[...prev.slice(0,-1),d.stroke]);}if(tool==='crop')setSelection({x:Math.round(Math.min(d.point[0],pt[0])),y:Math.round(Math.min(d.point[1],pt[1])),w:Math.floor(Math.abs(pt[0]-d.point[0])),h:Math.floor(Math.abs(pt[1]-d.point[1]))});}
  function up(e){const d=drag.current;drag.current=null;if(onOpen&&d&&d.onImage&&Math.hypot(e.clientX-d.screen[0],e.clientY-d.screen[1])<4)onOpen();if(tool==='crop'&&selection?.w>0&&selection?.h>0){onCrop(selection);setSelection(null);}}
  return <section className="image-panel"><h2>{label}<span>{asset?`${asset.width} × ${asset.height}`:''}</span></h2><div className={'viewport tool-'+tool} ref={host} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={()=>{drag.current=null;}}>

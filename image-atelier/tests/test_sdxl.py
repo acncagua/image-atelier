@@ -40,10 +40,31 @@ class SDXL(unittest.TestCase):
 
     def test_defaults_and_embedded_vae_require_only_checkpoint(self):
         p=self.params();self.assertEqual(p['denoise'],.7);self.assertEqual(p['clip_skip'],2);self.assertEqual(p['qwen_cfg'],7)
+        self.assertEqual(p['scheduler'],'automatic')
         job=self.run_job();self.assertEqual(job['status'],'completed',job['message'])
         self.assertNotIn('3',self.graph);self.assertEqual(self.graph['7']['inputs']['vae'],['1',2])
         self.assertEqual(self.graph['2']['inputs']['stop_at_clip_layer'],-2)
         self.assertEqual(self.graph['6']['inputs']['denoise'],1)
+        self.assertEqual(self.graph['6']['inputs']['scheduler'],'karras')
+
+    def test_automatic_scheduler_resolves_for_first_and_hires_passes(self):
+        expected={'dpmpp_2m':'karras','dpmpp_sde':'karras','dpmpp_sde_gpu':'karras','dpmpp_2m_sde':'exponential','dpmpp_2m_sde_heun':'exponential','dpmpp_3m_sde_gpu':'exponential','dpm_2':'karras','restart':'karras','euler':'normal','euler_ancestral':'normal','heun':'normal','lms':'normal','uni_pc':'normal','ddim':'ddim_uniform'}
+        for sampler,scheduler in expected.items():
+            with self.subTest(sampler=sampler):
+                p=self.params(sampler=sampler,hires_fix=True)
+                graph=s.workflow(p,self.config,42,[],'auto')
+                self.assertEqual(graph['6']['inputs']['scheduler'],scheduler)
+                self.assertEqual(graph['41']['inputs']['scheduler'],scheduler)
+                self.assertEqual(p['scheduler'],'automatic')
+        manual=s.workflow(self.params(sampler='euler',scheduler='karras',hires_fix=True),self.config,42,[],'manual')
+        self.assertEqual(manual['6']['inputs']['scheduler'],'karras');self.assertEqual(manual['41']['inputs']['scheduler'],'karras')
+        job=self.run_job(sampler='euler');self.assertEqual(job['status'],'completed',job['message']);self.assertEqual(self.graph['6']['inputs']['scheduler'],'normal')
+
+    def test_automatic_validates_the_resolved_comfy_scheduler_before_submission(self):
+        info=object_info();info['KSampler']['input']['required']['scheduler']=[['normal']]
+        available=s.inspect(info);self.assertIn('automatic',available['schedulers'])
+        with self.assertRaisesRegex(ValueError,'karras'):s.validate_models(available,self.config,self.params())
+        s.validate_models(available,self.config,self.params(sampler='euler'))
 
     def test_optional_vae_and_alternate_hires_checkpoint(self):
         for vae in ('','sdxl_vae.safetensors'):

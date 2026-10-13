@@ -135,6 +135,30 @@ class Comfy(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             c.collect(self.s,job,None,{'id':{'status':{'completed':False,'status_str':'error'}}})
 
+    def test_confirmed_error_finishes_job_and_allows_next_generation(self):
+        for active in (False,True,'invalid'):
+            with self.subTest(active=active):
+                self.calls=[];self.ident=None
+                job=self.s.submit(self.params())
+                def handler(request):
+                    if request.url.path.startswith('/history/'):
+                        return httpx.Response(200,json={self.ident:{'status':{'completed':False,'status_str':'error'}}})
+                    if request.url.path=='/queue' and active and self.ident==job['id']:
+                        if active=='invalid':return httpx.Response(200,json={})
+                        return httpx.Response(200,json={'queue_running':[[0,self.ident,{}, {},[]]],'queue_pending':[]})
+                    return self.handler(request)
+                def connection(config):return httpx.Client(base_url=config['url'],transport=httpx.MockTransport(handler))
+                with patch.object(c,'client',connection):Worker(self.s).run(job['id'])
+                self.assertEqual(self.s.job(job['id'])['status'],'unknown' if active else 'failed')
+                self.assertFalse(any(path=='/free' for _,path,_ in self.calls))
+                if active:
+                    with self.assertRaises(ValueError):c.guard(self.s)
+                    stopped=self.s.job(job['id']);stopped['status']='cancelled';self.s.save_job(stopped)
+                else:
+                    c.guard(self.s);next_job=self.s.submit(self.params())
+                    with patch.object(c,'client',self.client):Worker(self.s).run(next_job['id'])
+                    self.assertEqual(self.s.job(next_job['id'])['status'],'completed')
+
     def test_gguf_uses_dedicated_loader_without_standard_options(self):
         config={**self.config,'diffusion':'qwen-image-2.1-Q8_0.gguf'}
         graph=c.workflow(self.params(),config,42,[],'job')

@@ -13,6 +13,7 @@ from PIL import Image
 from persistence import atomic_write
 from imaging import mask_image, png
 import sdxl_backend
+from local_http import LOCAL_HTTP_TLS_CONTEXT
 
 DEFAULTS={'backend':'comfyui','url':'http://127.0.0.1:8188','diffusion':'','text_encoder':'','vae':'','checkpoint':'','hires_checkpoint':''}
 REQUIRED=('UNETLoader','CLIPLoader','VAELoader','TextEncodeQwenImage21','EmptyLatentImage','KSampler','VAEDecode','SaveImage','LoadImage')
@@ -51,7 +52,7 @@ def _configure(store,p):
     return values
 
 def client(config):
-    return httpx.Client(base_url=validate_url(config['url']),timeout=20,trust_env=False,follow_redirects=False)
+    return httpx.Client(base_url=validate_url(config['url']),timeout=20,trust_env=False,follow_redirects=False,verify=LOCAL_HTTP_TLS_CONTEXT)
 
 def get(c,path):
     r=c.get(path);r.raise_for_status();return r.json()
@@ -196,6 +197,8 @@ def standard_workflow(p,config,seed,images,ident,spec):
 
 def queue_ids(c):
     q=get(c,'/queue')
+    if not isinstance(q,dict) or any(not isinstance(q.get(key),list) or any(not isinstance(row,(list,tuple)) or len(row)<2 or not isinstance(row[1],str) for row in q[key]) for key in ('queue_running','queue_pending')):
+        raise ValueError('ComfyUIのキュー状態を確認できません。')
     return [x[1] for x in q.get('queue_running',[])],[x[1] for x in q.get('queue_pending',[])]
 
 def cancel_remote(c,ident):
@@ -284,10 +287,13 @@ def cancel(store,ident):
         atomic_write(store.path/'qwen-jobs'/ident/'cancel',b'cancel')
         job.update(message='ComfyUIの取消処理中…');store.save_job(job);return job
 
+class ComfyExecutionError(RuntimeError):
+    confirmed_stopped=False
+
 def collect(store,job,c,history):
     record=history.get(job['comfy_prompt_id'])
     if not record:return False
-    if record.get('status',{}).get('status_str')=='error':raise RuntimeError('ComfyUIの推論が失敗しました。中断ジョブを照合し、ComfyUIのログを確認してください。')
+    if record.get('status',{}).get('status_str')=='error':raise ComfyExecutionError('ComfyUIの推論が失敗しました。ComfyUIのログを確認してください。')
     if not record.get('status',{}).get('completed'):return False
     images=record.get('outputs',{}).get('8',{}).get('images',[])
     if len(images)!=1:raise RuntimeError('ComfyUIの出力画像が1枚ではありません。')
@@ -366,7 +372,12 @@ def run(worker,ident):
                         cancel_remote(c,remote_id)
                         job.update(status='cancelled',message='ComfyUIの処理を取り消しました。');store.save_job(job);release_models(store,c);return
                     history=get(c,'/history/'+remote_id)
-                    if collect(store,job,c,history):
+                    try:collected=collect(store,job,c,history)
+                    except ComfyExecutionError as error:
+                        running,pending=queue_ids(c)
+                        error.confirmed_stopped=remote_id not in running+pending
+                        raise
+                    if collected:
                         job.update(status='local_error');store.save_job(job)
                         worker._reprocess(ident);release_models(store,c);return
                     with store.lock:
@@ -378,7 +389,8 @@ def run(worker,ident):
                 job=store.job(ident)
                 if job['status']=='cancelled':return
                 rejected=isinstance(error,httpx.HTTPStatusError) and error.response.status_code==400 and not submitted
-                job.update(status='local_error' if store.response_file(ident) else 'unknown' if attempted and not rejected else 'failed',message='ComfyUI: '+str(error)[:300],error_type=type(error).__name__)
+                stopped=isinstance(error,ComfyExecutionError) and error.confirmed_stopped
+                job.update(status='local_error' if store.response_file(ident) else 'unknown' if attempted and not rejected and not stopped else 'failed',message='ComfyUI: '+str(error)[:300],error_type=type(error).__name__)
                 store.save_job(job)
         finally:
             with store.lock:

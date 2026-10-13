@@ -2,6 +2,7 @@ import React,{useEffect,useState} from 'react';
 import {api} from './api';
 import {localOutputSize,sdxlHiresEnabled} from './localModels';
 import {qwenProblem} from './qwenOptions';
+import {resolveSdxlScheduler} from './sdxlScheduler';
 
 const samplerNames={dpmpp_2m:'DPM++ 2M',dpmpp_sde:'DPM++ SDE',dpmpp_2m_sde:'DPM++ 2M SDE',dpmpp_3m_sde:'DPM++ 3M SDE',euler_ancestral:'Euler a',euler:'Euler',heun:'Heun',lms:'LMS',dpm_2:'DPM2',dpm_2_ancestral:'DPM2 a',uni_pc:'UniPC',lcm:'LCM'};
 const upscaleName=value=>{const [kind,...rest]=value.split(':');return (kind==='latent'?'Latent · ':kind==='pixel'?'画像補間 · ':'モデル · ')+rest.join(':');};
@@ -15,7 +16,7 @@ export default function SdxlControls({p,change,target,keep,onKeep,onReady,strata
  async function perform(fn){setBusy(true);try{await fn();}catch(e){setMessage(e.message);}finally{setBusy(false);}}
  function selection(key,value){setConfig(c=>({...c,[key]:value}));}
  function numeric(key,label,min,max,step=1){return <label>{label}<input aria-label={label} type="number" min={min} max={max} step={step} value={p[key]} onChange={e=>change(key,Number(e.target.value))}/></label>;}
- function parameter(key,label,choices,format=v=>v){const options=[...new Set([p[key],...(choices||[])])].filter(Boolean);return <label className="field">{label}<select aria-label={label} disabled={busy} value={p[key]} onChange={e=>change(key,e.target.value)}>{options.map(v=><option key={v} value={v}>{format(v)}</option>)}</select></label>;}
+ function parameter(key,label,choices,format=v=>v){const options=[...new Set([...(key==='scheduler'?['automatic']:[]),p[key],...(choices||[])])].filter(Boolean);return <label className="field">{label}<select aria-label={label} disabled={busy} value={p[key]} onChange={e=>change(key,e.target.value)}>{options.map(v=><option key={v} value={v}>{format(v)}</option>)}</select></label>;}
  function modelChoice(key,label,empty){const options=models?(models[key==='vae'?'vae':'checkpoint']||[]):[config[key]];return <label className="field">{label}<select aria-label={label} disabled={busy} value={config[key]} onChange={e=>selection(key,e.target.value)}><option value="">{empty}</option>{options.filter(Boolean).map(v=><option key={v} value={v}>{v}</option>)}</select></label>;}
  const canSave=models&&!models.missing.length&&models.checkpoint?.includes(config?.checkpoint)&&(!config?.vae||models.vae?.includes(config.vae))&&(!hires||!config?.hires_checkpoint||models.checkpoint?.includes(config.hires_checkpoint));
  const size=localOutputSize(p,target),problem=qwenProblem(p,target);
@@ -31,7 +32,8 @@ export default function SdxlControls({p,change,target,keep,onKeep,onReady,strata
  {dirty?<p className="warning">モデル設定が未保存です。保存後に実行できます。</p>:null}
  </>:null}</details>
  {parameter('sampler','サンプリング',models?.samplers,v=>samplerNames[v]||v)}
- {parameter('scheduler','スケジューラー',models?.schedulers)}
+ {parameter('scheduler','スケジューラー',models?.schedulers,v=>v==='automatic'?'Automatic':v)}
+ {p.scheduler==='automatic'?<small>Automatic → {resolveSdxlScheduler(p.sampler,p.scheduler)}（サンプリングに応じて選択）</small>:null}
  <div className="inline">{numeric('qwen_steps','Step数',1,150)}{numeric('qwen_cfg','CFGスケール',1,30,0.5)}{numeric('clip_skip','CLIP skip',1,24)}</div>
  <div className="inline">{numeric('qwen_seed','シード',-1,4294967295)}<button onClick={()=>change('qwen_seed',-1)}>シードを変更</button></div>
  {numeric('denoise','デノイズ強度',0,1,0.05)}<small>編集とHiresの再生成に使用します。新規生成の1段目は1.0です。シード-1は毎回ランダムです。</small>

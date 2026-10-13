@@ -91,10 +91,13 @@ def canonical_input(p):
     result={k:copy.deepcopy(p.get(k,v)) for k,v in defaults.items()}
     result['refs']=[{'id':r['id'],'role':r['role'],'person':r.get('person','')} for r in result['refs']]
     result['strokes']=[{'width':float(r['width']),'erase':bool(r.get('erase',False)),
-                       'points':[[float(x),float(y)] for x,y in r['points']]} for r in result['strokes']]
+                       'points':[[float(x),float(y)] for x,y in r['points']],
+                       **({'color':r['color']} if 'color' in r else {}),**({'opacity':r['opacity']} if 'opacity' in r else {})} for r in result['strokes']]
     if local_models.is_local(result['model']):
         result.update({k:copy.deepcopy(p.get(k,v)) for k,v in local_models.defaults_for(result['model']).items()})
-        if result['model']=='SDXL' and result['mode']!='generate':result['hires_fix']=False
+        if result['model']=='SDXL':
+            if result['mode']!='generate':result['hires_fix']=False
+            if result['mode'] not in ('polish','inpaint'):result['sketch']=False
         if p.get('pe_job_id'):result['pe_job_id']=safe_id(p['pe_job_id'])
     if type(p.get('reference_sheets',False)) is not bool:raise ValueError('リファレンス指定が不正です。')
     if p.get('reference_sheets'):result['reference_sheets']=True
@@ -176,6 +179,15 @@ class Store:
         prefix='http_response_' if http else 'response_'
         atomic_write(self.path/(prefix+ident+'.json'),content)
         atomic_write(self.path/('response_meta_'+ident+'.json'),json.dumps({'request_id':request_id,'saved':now()}).encode())
+
+    def error_response_file(self,ident):
+        safe_id(ident);self.job(ident)
+        file=self.path/('http_error_'+ident+'.bin')
+        return file if file.is_file() else None
+
+    def write_error_response(self,ident,content):
+        safe_id(ident);self.job(ident)
+        atomic_write(self.path/('http_error_'+ident+'.bin'),content)
 
     def meta(self, ident):
         with self.lock:

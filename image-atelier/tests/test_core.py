@@ -156,6 +156,77 @@ class Tests(unittest.TestCase):
             error=httpx.HTTPStatusError('PRIVATE KEY',request=httpx.Request('POST','https://api.openai.com/v1/images/edits'),response=httpx.Response(code))
             with patch('core.mock_request',side_effect=error):Worker(self.s).run(j['id'])
             job=self.s.job(j['id']);self.assertEqual(job['status'],'unknown' if code==500 else 'failed');self.assertNotIn('PRIVATE KEY',json.dumps(job))
+
+    def test_http_400_saves_complete_json_details_and_exact_bytes_without_retry(self):
+        payload={'error':{'code':'invalid_value','type':'invalid_request_error','message':'入力に問題があります。'*100,'param':'size','moderation_details':{'category':'example'}},'extra':'retained'}
+        raw=json.dumps(payload,ensure_ascii=False,indent=2).encode('utf-8')
+        response=httpx.Response(400,content=raw,headers={'content-type':'application/json','x-request-id':'req-test'},request=httpx.Request('POST','https://api.openai.com/v1/images/edits',headers={'Authorization':'Bearer PRIVATE KEY'}))
+        error=httpx.HTTPStatusError('PRIVATE KEY',request=response.request,response=response)
+        with patch('core.api_key',return_value='test-only'):
+            job=self.s.submit(self.p(provider='openai'));worker=Worker(self.s)
+            with patch('core.real_request',side_effect=error) as request:
+                worker.run(job['id']);worker.run(job['id']);self.assertEqual(request.call_count,1)
+        result=self.s.job(job['id']);details=result['http_error']
+        self.assertEqual(result['status'],'failed');self.assertEqual(result['reserved'],0)
+        self.assertEqual(details['status_code'],400);self.assertEqual(details['body'],payload);self.assertEqual(details['error'],payload['error'])
+        self.assertEqual(details['request_id'],'req-test');self.assertTrue(details['saved'])
+        self.assertEqual(self.s.error_response_file(job['id']).read_bytes(),raw);self.assertIsNone(self.s.response_file(job['id']))
+        self.assertNotIn('PRIVATE KEY',json.dumps(result))
+        app=create_app(self.s.path,False)
+        with TestClient(app) as client:
+            download=client.get('/api/jobs/'+job['id']+'/error-response')
+            self.assertEqual(download.status_code,200);self.assertEqual(download.content,raw)
+            self.assertIn('attachment',download.headers['content-disposition'])
+            self.assertEqual(client.get('/api/jobs/'+job['id']+'/recovery').status_code,400)
+        app.state.store.db.close()
+
+    def test_http_400_preserves_text_and_optional_missing_fields(self):
+        for raw in (b'<html>Bad request</html>\xff',b'{"error":{"message":"bad"},"request_id":"body-request"}'):
+            with self.subTest(raw=raw),patch('core.api_key',return_value='test-only'):
+                response=httpx.Response(400,content=raw,request=httpx.Request('POST','https://api.openai.com/v1/images/generations'))
+                error=httpx.HTTPStatusError('bad',request=response.request,response=response)
+                job=self.s.submit(self.p(provider='openai'))
+                with patch('core.real_request',side_effect=error):Worker(self.s).run(job['id'])
+                details=self.s.job(job['id'])['http_error']
+                self.assertEqual(self.s.error_response_file(job['id']).read_bytes(),raw)
+                self.assertNotIn('moderation_details',details['error']);self.assertIsNone(details['error']['param'])
+                if raw.startswith(b'<'):
+                    self.assertEqual(details['body_format'],'text');self.assertEqual(details['body'],response.text)
+                else:self.assertEqual(details['request_id'],'body-request')
+
+    def test_http_400_file_failure_retains_body_until_local_resume_without_api(self):
+        raw=b'{"error":{"code":"invalid_value","message":"keep me"}}'
+        response=httpx.Response(400,content=raw,request=httpx.Request('POST','https://api.openai.com/v1/images/edits'))
+        error=httpx.HTTPStatusError('bad',request=response.request,response=response)
+        with patch('core.api_key',return_value='test-only'):
+            job=self.s.submit(self.p(provider='openai'));worker=Worker(self.s)
+            with patch('core.real_request',side_effect=error) as request:
+                with patch.object(self.s,'write_error_response',side_effect=PermissionError):worker.run(job['id'])
+                self.assertEqual(worker.health()['state'],'fault');self.assertIn(job['id'],worker.health()['volatile_error_response_ids'])
+                self.assertEqual(self.s.job(job['id'])['http_error']['body']['error']['message'],'keep me')
+                self.assertFalse(self.s.job(job['id'])['http_error']['saved'])
+                worker.resume();self.assertEqual(request.call_count,1)
+        self.assertEqual(worker.health()['state'],'running');self.assertEqual(self.s.error_response_file(job['id']).read_bytes(),raw)
+        self.assertTrue(self.s.job(job['id'])['http_error']['saved']);self.assertEqual(self.s.job(job['id'])['status'],'failed')
+
+    def test_http_400_db_failure_restores_error_log_without_api_retry(self):
+        raw=b'{"error":{"message":"retain despite DB failure"}}'
+        response=httpx.Response(400,content=raw,headers={'x-request-id':'req-db'},request=httpx.Request('POST','https://api.openai.com/v1/images/edits'))
+        error=httpx.HTTPStatusError('bad',request=response.request,response=response)
+        original=self.s.save_job;failed=False
+        def save(job):
+            nonlocal failed
+            if job.get('phase')=='api_error' and not failed:failed=True;raise OSError('DB failed')
+            original(job)
+        with patch('core.api_key',return_value='test-only'):
+            job=self.s.submit(self.p(provider='openai'));worker=Worker(self.s)
+            with patch('core.real_request',side_effect=error) as request:
+                with patch.object(self.s,'save_job',side_effect=save):worker.run(job['id'])
+                self.assertEqual(worker.health()['state'],'fault');self.assertIn(job['id'],worker.volatile_errors)
+                worker.resume();self.assertEqual(request.call_count,1)
+        result=self.s.job(job['id']);self.assertEqual(result['status'],'failed');self.assertEqual(result['request_id'],'req-db')
+        self.assertEqual(result['http_error']['body']['error']['message'],'retain despite DB failure')
+        self.assertIn('400',result['message'])
     def test_real_transport_contract_without_network(self):
         p=self.p(mode='inpaint',refs=[{'id':self.a['id'],'role':'face'}],strokes=[{'width':20,'points':[[20,20]]}]);j=self.s.submit(p)
         response=httpx.Response(200,json={'data':[{'b64_json':base64.b64encode(self.s.file(self.a['id']).read_bytes()).decode()}],'usage':{'output_tokens':20}},headers={'x-request-id':'test-id'},request=httpx.Request('POST','https://api.openai.com'))

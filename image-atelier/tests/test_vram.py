@@ -118,30 +118,39 @@ class VRAM(unittest.TestCase):
         with self.assertRaises(ValueError):self.s.submit(self.params())
         self.finish.set();self.manager.thread.join(5);self.assertEqual(self.manager.status()['phase'],'acquired')
 
-    def test_insufficient_free_does_not_become_acquired(self):
+    def test_below_target_allows_generation_and_reports_observed_free(self):
         self.prepare();self.free_result=14*1024;self.gpu['free_mib']=14*1024;s=self.action('acquire')
-        self.assertEqual(s['phase'],'insufficient');self.assertIn('18GiB',s['message']);self.assertIn('14.00GiB',s['message']);self.assertFalse(s['ready_for_generation'])
+        self.assertEqual(s['phase'],'acquired');self.assertIn('18GiB',s['message']);self.assertIn('14.00GiB',s['message']);self.assertTrue(s['ready_for_generation'])
+        self.assertIn('目標未達',s['message'])
+        job=self.s.submit(self.params());Worker(self.s).run(job['id']);self.assertEqual(self.s.job(job['id'])['status'],'completed')
+        self.assertEqual(self.posts('/free'),[]);self.assertEqual(len(self.posts('strata/v1/vram')),1)
 
-    def test_shortfall_up_to_one_gib_is_allowed_but_more_is_rejected(self):
-        for shortage in (156,1024,1025):
+    def test_shortfall_has_no_limit_when_free_measurement_is_available(self):
+        for shortage in (156,1024,1025,4096,18431,18432):
             with self.subTest(shortage=shortage):
                 self.prepare();self.free_result=18432-shortage;self.gpu['free_mib']=24576
                 s=self.action('acquire')
-                self.assertEqual(s['phase'],'acquired' if shortage<=1024 else 'insufficient')
-                self.assertEqual(s['ready_for_generation'],shortage<=1024)
-                if shortage<=1024:
-                    self.assertEqual(s['lease']['shortfall_mib'],shortage)
-                    self.assertIn('許容1GiB以内',s['message'])
+                self.assertEqual(s['phase'],'acquired');self.assertTrue(s['ready_for_generation'])
+                self.assertEqual(s['lease']['shortfall_mib'],shortage)
+                self.assertNotIn('tolerance_mib',s['lease']);self.assertIn('目標未達',s['message'])
                 self.action('release')
-        self.prepare();self.free_result=24576;self.gpu['free_mib']=17407
-        self.assertEqual(self.action('acquire')['phase'],'insufficient')
+        self.prepare();self.free_result=24576;self.gpu['free_mib']=1
+        s=self.action('acquire');self.assertEqual(s['phase'],'acquired');self.assertEqual(s['lease']['free_mib_at_acquire'],1)
 
-    def test_uncertain_reserve_reconciliation_uses_same_shortfall_tolerance(self):
+    def test_uncertain_reserve_reconciliation_allows_large_shortfall(self):
         self.prepare();self.pending_strata=True
         self.assertEqual(self.action('acquire')['phase'],'unknown')
-        self.reserve=18432;self.gpu['free_mib']=17408
+        self.reserve=18432;self.gpu['free_mib']=14336
         s=self.manager.status()
-        self.assertEqual(s['phase'],'acquired');self.assertEqual(s['lease']['shortfall_mib'],1024)
+        self.assertEqual(s['phase'],'acquired');self.assertEqual(s['lease']['shortfall_mib'],4096)
+
+    def test_unknown_free_measurement_is_not_treated_as_zero_or_ready(self):
+        self.prepare();self.pending_strata=True
+        self.assertEqual(self.action('acquire')['phase'],'unknown');self.reserve=18432
+        peer=strata.probe(self.manager.config());peer['vram']['vram_free_mib']='unavailable'
+        with patch.object(strata,'probe',return_value=peer):s=self.manager.status()
+        self.assertEqual(s['phase'],'unconfirmed');self.assertFalse(s['ready_for_generation']);self.assertIsNone(s['lease'])
+        self.assertIn('取得できません',s['message'])
 
     def test_queue_and_common_gpu_lock_refuse_ops_without_cancelling_others(self):
         self.enable();self.queue=[[0,'other-client',{}, {},[]]]
@@ -195,10 +204,9 @@ class VRAM(unittest.TestCase):
 
     def test_failure_and_cancellation_do_not_auto_unload_or_resume(self):
         self.prepare();self.action('acquire');self.calls.clear();self.generation_error=True
-        job=self.s.submit(self.params());Worker(self.s).run(job['id']);self.assertEqual(self.s.job(job['id'])['status'],'unknown')
+        job=self.s.submit(self.params());Worker(self.s).run(job['id']);self.assertEqual(self.s.job(job['id'])['status'],'failed')
         self.assertEqual(self.posts('/free'),[]);self.assertEqual(self.posts('strata/v1/vram'),[])
-        with self.assertRaises(ValueError):self.manager.start('release')
-        c.recover(self.s,Worker(self.s));self.assertEqual(self.s.job(job['id'])['status'],'failed')
+        c.guard(self.s);self.assertEqual(c.recover(self.s,Worker(self.s)),[])
         self.generation_error=False;self.cancel_after_post=True
         job=self.s.submit(self.params());Worker(self.s).run(job['id']);self.assertEqual(self.s.job(job['id'])['status'],'cancelled')
         self.assertEqual(self.posts('/free'),[]);self.assertEqual(self.posts('strata/v1/vram'),[])

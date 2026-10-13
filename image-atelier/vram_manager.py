@@ -12,10 +12,8 @@ import gpu_status
 from persistence import atomic_write
 from local_config import strata_api_key
 
-SHORTFALL_TOLERANCE_MIB=1024
-
-def capacity_accepted(actual,target):
-    return type(actual) in (int,float) and math.isfinite(actual) and actual>0 and target-actual<=SHORTFALL_TOLERANCE_MIB
+def free_measurement_available(actual):
+    return type(actual) in (int,float) and math.isfinite(actual) and actual>=0
 
 def observed_free(gpu,peer):
     value=peer.get('vram',{}).get('vram_free_mib',gpu['free_mib'])
@@ -123,9 +121,9 @@ class VRAMManager:
                         if not clean:self.set(pending=None,resume_pending=True,lease=None,comfy_confirmed=False,phase='unconfirmed',message='変更の適用後にComfyUIの処理を検出しました。一度解放してください。')
                         elif peer['state']!='loaded' or not s['gpu'] or s['gpu']['uuid']!=pending.get('gpu_uuid'):
                             self.set(pending=None,resume_pending=True,lease=None,phase='unconfirmed',message='変更の適用値を確認しましたが、Strata・対象GPUの状態を照合できません。一度解放してください。')
-                        elif capacity_accepted(observed_free(s['gpu'],peer),pending['target_mib']):
+                        elif free_measurement_available(observed_free(s['gpu'],peer)):
                             self._reserved(config,peer,s['gpu'],pending['comfy_url'],observed_free(s['gpu'],peer))
-                        else:self.set(pending=None,resume_pending=True,phase='insufficient',message='変更の適用を確認しましたが、実際の空きが不足しています。')
+                        else:self.set(pending=None,resume_pending=True,lease=None,phase='unconfirmed',message='変更の適用を確認しましたが、空き容量を取得できません。状態を再確認してください。')
                     elif pending['kind']=='resume' and peer.get('vram',{}).get('reserve_mib')!=pending.get('previous_reserve'):
                         self.set(pending=None,resume_pending=False,phase='released',message='ComfyUI解放済み。Strata復帰要求の適用を状態APIで確認しました。')
             s=self.snapshot()
@@ -176,9 +174,9 @@ class VRAMManager:
         target=strata.target_mib(config);actual=gpu['free_mib'] if actual is None else actual
         shortage=max(0,target-actual)
         lease={'strata_url':config['url'],'comfy_url':comfy_url,'gpu_uuid':gpu['uuid'],'target_mib':target,'peer_identity':peer.get('identity'),'vram_signature':self._peer_signature(peer),
-               'free_mib_at_acquire':actual,'shortfall_mib':shortage,'tolerance_mib':SHORTFALL_TOLERANCE_MIB}
-        message='画像生成用VRAM確保済み。'
-        if shortage:message+=f'要求{target/1024:g}GiB／実際{actual/1024:.2f}GiB。不足{shortage/1024:.2f}GiBは許容1GiB以内です。'
+               'free_mib_at_acquire':actual,'shortfall_mib':shortage}
+        message='画像生成用VRAM確保操作が完了しました。'
+        if shortage:message+=f'要求{target/1024:g}GiB／実際{actual/1024:.2f}GiB。目標未達ですが画像生成を開始できます。'
         self.set(lease=lease,context=lease,pending=None,resume_pending=True,phase='acquired',message=message+'手動解放までComfyUIモデルを保持します。')
     def _run(self,action,config):
         started=time.monotonic();locked=False
@@ -230,7 +228,7 @@ class VRAMManager:
             self.set(lease=None,phase='not_needed',message='Strataモデルは未ロードです。通常生成を利用できます。変更要求は次のロード時に適用されるため、終了後は手動解放してください。');return
         if not self._still_unloaded(c,s['comfy_anchor']):
             self.set(lease=None,comfy_confirmed=False,phase='unconfirmed',message='確保待ち中に別のComfyUI処理を検出しました。一度解放してください。');return
-        if not capacity_accepted(actual,target):self.set(phase='insufficient',message=f'必要な空きを確保できませんでした。要求{target/1024:g}GiB／実際{actual/1024:.2f}GiB。不足の許容は1GiB以内です。');return
+        if not free_measurement_available(actual):self.set(lease=None,phase='unconfirmed',message='Strataの変更は完了しましたが、空き容量を取得できません。状態を再確認してください。');return
         self._reserved(config,peer,gpu,pending['comfy_url'],actual)
 
     def _release(self,c,config):

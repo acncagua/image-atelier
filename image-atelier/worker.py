@@ -13,6 +13,20 @@ from persistence import atomic_write
 from imaging import normalize, png, mask_image, api_mask, composite
 from output_paths import category_for_mode
 
+def http_error_details(response):
+    try:body=response.json();body_format='json'
+    except ValueError:body=response.text;body_format='text'
+    details=body.get('error') if isinstance(body,dict) else None
+    details=details if isinstance(details,dict) else {}
+    error={key:details.get(key) for key in ('code','type','message','param')}
+    if 'moderation_details' in details:error['moderation_details']=details['moderation_details']
+    request_id=response.headers.get('x-request-id')
+    if not request_id and isinstance(body,dict):
+        value=body.get('request_id') or details.get('request_id')
+        if isinstance(value,str):request_id=value
+    return {'status_code':response.status_code,'content_type':response.headers.get('content-type'),
+            'body_format':body_format,'body':body,'error':error,'request_id':request_id,'saved':False}
+
 
 class Worker:
     def __init__(self,store,mock_gate=None):
@@ -20,11 +34,11 @@ class Worker:
         self.thread=threading.Thread(target=self.loop,daemon=True)
         self.execution=threading.RLock()
         self.state='running';self.current=None;self.fault_type=None
-        self.volatile={};self.mock_gate=mock_gate
+        self.volatile={};self.volatile_errors={};self.mock_gate=mock_gate
 
     def health(self):
         return {'state':'stopped' if self.stop.is_set() else self.state,'current_job':self.current,
-                'error_type':self.fault_type,'volatile_response_ids':list(self.volatile),
+                'error_type':self.fault_type,'volatile_response_ids':list(self.volatile),'volatile_error_response_ids':list(self.volatile_errors),
                 'message':'永続化または処理に失敗しました。保存先・空き容量を確認し、ワーカーを再開してください。APIは自動再送しません。' if self.state=='fault' else '並列数1・結果不明は自動再送しません。'}
 
     def fault(self,error):
@@ -44,6 +58,11 @@ class Worker:
                 for ident,(content,request_id) in list(self.volatile.items()):
                     self.store.write_response(ident,content,request_id,http=True)
                     del self.volatile[ident]
+                for ident,(content,details) in list(self.volatile_errors.items()):
+                    self.store.write_error_response(ident,content)
+                    job=self.store.job(ident)
+                    job.update(status='failed',phase='api_error',reserved=0,error_type='HTTPStatusError',message=api_error_message(httpx.Response(details['status_code'],content=content)),request_id=details['request_id'],http_error={**details,'saved':True})
+                    self.store.save_job(job);del self.volatile_errors[ident]
                 self.store.recover(cancel_queued=False)
                 self.state='running';self.current=None;self.fault_type=None
                 if self.thread.ident is not None and not self.thread.is_alive() and not self.stop.is_set():
@@ -115,7 +134,14 @@ class Worker:
                     status=error.response.status_code
                     job.update(status='unknown' if status>=500 or status==408 else 'failed',phase='api_error',request_id=error.response.headers.get('x-request-id'),message=api_error_message(error.response))
                     if job['status']=='failed':job['reserved']=0
-                    self.persist(job)
+                    details=None
+                    if status==400 and p['provider']=='openai':
+                        details=http_error_details(error.response)
+                        job.update(error_type=type(error).__name__,request_id=details['request_id'],http_error=details)
+                        try:self.store.write_error_response(ident,error.response.content);details['saved']=True
+                        except OSError as save_error:
+                            self.volatile_errors[ident]=(error.response.content,details.copy());self.fault(save_error)
+                    if not self.persist(job) and details is not None:self.volatile_errors[ident]=(error.response.content,details.copy())
             except Exception as error:
                 if isinstance(error,core.ResponsePersistenceError):
                     self.volatile[ident]=(error.content,error.request_id)

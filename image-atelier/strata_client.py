@@ -3,6 +3,7 @@ import math
 from urllib.parse import urlsplit,urlunsplit
 import httpx
 from local_config import strata_api_key
+from local_http import LOCAL_HTTP_TLS_CONTEXT
 
 DEFAULTS={'enabled':False,'url':'http://127.0.0.1:8080','gpu_uuid':'','target_gib':18,'probe_timeout':5,'change_timeout':900}
 
@@ -23,8 +24,9 @@ def validate_settings(value):
 def target_mib(config):return math.ceil(config['target_gib']*1024)
 
 def client(config):
+    config=validate_settings(config)
     key=strata_api_key()
-    return httpx.Client(base_url=config['url'],headers={'Authorization':'Bearer '+key} if key else {},timeout=httpx.Timeout(config['change_timeout'],connect=config['probe_timeout']),trust_env=False,follow_redirects=False)
+    return httpx.Client(base_url=config['url'],headers={'Authorization':'Bearer '+key} if key else {},timeout=httpx.Timeout(config['change_timeout'],connect=config['probe_timeout']),trust_env=False,follow_redirects=False,verify=LOCAL_HTTP_TLS_CONTEXT)
 
 def safe_error(error):
     if isinstance(error,httpx.HTTPStatusError):

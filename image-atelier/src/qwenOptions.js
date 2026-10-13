@@ -1,4 +1,5 @@
 import {localSpec,isLocalModel,localOutputSize,sdxlHiresEnabled} from './localModels.js';
+import {sketchEnabled,validSketchColor} from './sketch.js';
 export const QWEN_MODEL='Qwen-Image-2.1';
 export const qwenDefaults={qwen_timing:false,qwen_cfg:1.0,qwen_negative:'',qwen_steps:40,qwen_seed:42,qwen_offload:'model',qwen_tile:512,qwen_stride:384};
 export function qwenProblem(p,target=null){
@@ -10,6 +11,7 @@ export function qwenProblem(p,target=null){
  if([p.width,p.height].some(v=>!Number.isInteger(v)||v<128||v>2048||v%32))return 'ローカルモデルの出力寸法は各辺128〜2048px・32の倍数で指定してください。';
  if(!Number.isInteger(p.qwen_steps)||p.qwen_steps<1||p.qwen_steps>(sdxl?150:50))return sdxl?'ステップ数は1〜150です。':'ステップ数は1〜50です。';
  if(sdxl){
+  if(sketchEnabled(p)&&(!validSketchColor(p.sketch_color)||!Number.isFinite(p.sketch_opacity)||p.sketch_opacity<0||p.sketch_opacity>1))return '描画色・不透明度が不正です。';
   if(!Number.isFinite(p.denoise)||p.denoise<0||p.denoise>1)return 'デノイズ強度は0〜1です。';
   if(!Number.isInteger(p.clip_skip)||p.clip_skip<1||p.clip_skip>24)return 'CLIP skipは1〜24です。';
   if(!['whole','masked'].includes(p.inpaint_area))return 'Inpaint areaが不正です。';

@@ -18,14 +18,26 @@ export function tagContext(value,caret,end=caret){
  if(caret<start||caret>stop)return null;
  const query=value.slice(start,caret).trim();
  if(query.length<2||query.length>80||query.startsWith('__')||!/[a-z0-9]/i.test(query)||/[<>\u3000-\u9fff]/.test(query))return null;
- return {start,end:stop,query,segmentEnd,wrapping:/[\[(]/.test(leading),key:JSON.stringify([start,stop,query])};
+ return {start,end:caret,tokenEnd:stop,query,segmentEnd,wrapping:/[\[(]/.test(leading),key:JSON.stringify([start,caret,stop,query])};
 }
 
 export function insertTag(value,context,tag){
  const text=tag.replaceAll('_',' ').replace(/[()]/g,'\\$&');
- let next=value.slice(0,context.start)+text+value.slice(context.end);
+ const normalize=s=>s.replace(/\\([()])/g,'$1').replaceAll('_',' ').toLowerCase();
+ let end=context.end;
+ const tail=value.slice(end,context.tokenEnd);
+ // Only consume a continuation already belonging to the selected completion;
+ // unrelated text after the caret remains a separate tag.
+ const candidate=normalize(tag),prefix=normalize(context.query),continuation=normalize(tail);
+ if(tail&&candidate.startsWith(prefix)&&candidate.endsWith(continuation)&&prefix.length+continuation.length<=candidate.length)end=context.tokenEnd;
+ if(end<context.tokenEnd){
+  const suffix=value.slice(end),spaces=suffix.match(/^[ \t]*/)[0];
+  const inserted=text+','+(spaces?'':' ');
+  return {value:value.slice(0,context.start)+inserted+suffix,caret:context.start+inserted.length+spaces.length};
+ }
+ let next=value.slice(0,context.start)+text+value.slice(end);
  let caret=context.start+text.length;
- const delta=text.length-(context.end-context.start);
+ const delta=text.length-(end-context.start);
  const segmentEnd=context.segmentEnd+delta;
  if(segmentEnd===next.length){
   // Keep an unfinished weight wrapper intact; append separators after complete tags.

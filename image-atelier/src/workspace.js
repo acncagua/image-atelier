@@ -89,9 +89,26 @@ export class Registration{
   try{
    let job;
    try{job=await this.request('jobs/'+this.record.payload.id);}
-   catch(error){if(error.status===404)return await this.send();throw new Error('登録状況を確認できません。同じIDと入力を保持しています。');}
-   const accepted={...this.record,state:'accepted',revision:Math.max(Date.now(),(this.record.revision||0)+1),jobId:job.id};
-   if(await this.save('registrations',accepted)===false)throw new Error('受付結果を保存できません。');this.record=accepted;return job;
+   catch(error){
+    if(error.status!==404)throw new Error('登録状況を確認できません。同じIDと入力を保持しています。');
+    const frozen=structuredClone(this.record),body=frozen.payload;
+    const archive={id:crypto.randomUUID(),schema:SCHEMA,revision:Date.now(),updated:Date.now(),label:'未登録を確認した送信条件',registration:frozen,
+     payload:{instructionOrderVersion:1,qwenPromptVersion:2,p:body,prompt:body.prompt,promptValid:true,refs:body.refs||[],strokes:body.strokes||[],redo:[],targetId:body.target||null}};
+    if(await this.save('archives',archive)===false)throw new Error('元の送信条件を保管できません。');
+    const missing={...this.record,state:'not_found',revision:Math.max(Date.now(),(this.record.revision||0)+1)};
+    if(await this.save('registrations',missing)===false)throw new Error('確認結果を保存できません。');
+    this.record=missing;return null;
+   }
+   return await this.acceptExisting(job);
   }finally{this.busy=false;}
+ }
+ async acceptExisting(job){
+  if(job?.id!==this.record?.payload?.id)throw new Error('登録IDが一致しません。');
+  const accepted={...this.record,state:'accepted',revision:Math.max(Date.now(),(this.record.revision||0)+1),jobId:job.id};
+  if(await this.save('registrations',accepted)===false)throw new Error('受付結果を保存できません。');this.record=accepted;return job;
+ }
+ async confirmExisting(job){
+  if(this.busy||this.record?.state!=='unconfirmed'||job?.id!==this.record.payload.id)return null;
+  this.busy=true;try{return await this.acceptExisting(job);}finally{this.busy=false;}
  }
 }

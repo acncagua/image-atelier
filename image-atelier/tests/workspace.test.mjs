@@ -6,6 +6,27 @@ import {recoverDraft,resolveDraftAssets} from '../src/draftValidation.js';
 import {readFileSync} from 'node:fs';
 import {tagContext,insertTag} from '../src/tagCompletion.js';
 import {upscalePlan,upscaleDefaults,restoreUpscaleOptions} from '../src/upscalePlan.js';
+import {elapsedText} from '../src/jobResult.js';
+import {sketchEnabled} from '../src/sketch.js';
+
+test('Sketch color strokes, opacity and undo survive draft restoration',async()=>{
+ const {localDefaults,selectLocalModel}=await import('../src/localModels.js');
+ const defaults=selectLocalModel({...localDefaults,...qwenDefaults,mode:'polish',provider:'comfyui',quality:'medium'},'SDXL');
+ const p={...defaults,sketch:true,sketch_color:'#00ff00',sketch_opacity:.5};
+ const stroke={width:30,points:[[20,40]],color:'#ff0000',opacity:.7};
+ const saved={p,strokes:[stroke],redo:[{...stroke,erase:true}],refs:[]};
+ const restored=recoverDraft(saved,defaults).payload;assert.deepEqual(restored.p,p);assert.deepEqual(restored.strokes,saved.strokes);assert.deepEqual(restored.redo,saved.redo);
+ assert.equal(sketchEnabled(p),true);assert.equal(sketchEnabled({...p,mode:'inpaint'}),true);assert.equal(sketchEnabled({...p,mode:'generate'}),false);assert.equal(sketchEnabled({...p,model:'Qwen-Image-2.1'}),false);
+ const bad=recoverDraft({...saved,strokes:[{...stroke,color:'bad'}]},defaults);assert.deepEqual(bad.payload.strokes,[]);assert.ok(bad.warnings.length);
+});
+
+test('finished recovered jobs without a duration do not keep counting elapsed time',()=>{
+ for(const status of ['completed','failed','cancelled','unknown','local_error']){
+  const job={status,started:100};assert.equal(elapsedText(job,200000),'時間未記録');assert.equal(elapsedText(job,2000000),'時間未記録');
+ }
+ assert.equal(elapsedText({status:'sending',started:100},103000),'3秒');
+ assert.equal(elapsedText({status:'completed',started:100,elapsed:57.63},200000),'57.63秒');
+});
 
 test('tag completion replaces the tag around the caret and preserves later tags',()=>{
  const text='1girl, blu_hair, smile',caret=text.indexOf('blu')+3;
@@ -13,6 +34,32 @@ test('tag completion replaces the tag around the caret and preserves later tags'
  const completed=insertTag(text,context,'blue_hair');assert.equal(completed.value,'1girl, blue hair, smile');assert.equal(completed.caret,completed.value.indexOf('smile'));
  const ending='long h';assert.equal(insertTag(ending,tagContext(ending,ending.length),'long_hair').value,'long hair, ');
  const newline='long h\nsmile';assert.equal(insertTag(newline,tagContext(newline,6),'long_hair').value,'long hair\nsmile');
+});
+
+test('tag completion inserts before existing prompt text without swallowing its next tag',()=>{
+ const suffix=' fuzichoco, incredibly absurdres, highres, masterpiece, newest, ';
+ const text='1girl,shig'+suffix,caret='1girl,shig'.length;
+ const result=insertTag(text,tagContext(text,caret),'shigure_(kancolle)');
+ assert.equal(result.value,'1girl,shigure \\(kancolle\\),'+suffix);
+ assert.equal(result.caret,result.value.indexOf('fuzichoco'));
+ const adjacent='1girl, shigfuzichoco, highres';
+ const inserted=insertTag(adjacent,tagContext(adjacent,'1girl, shig'.length),'shigure_(kancolle)');
+ assert.equal(inserted.value,'1girl, shigure \\(kancolle\\), fuzichoco, highres');
+ const negative='lowres, bad h bad anatomy, watermark';
+ assert.equal(insertTag(negative,tagContext(negative,'lowres, bad h'.length),'bad_hands').value,'lowres, bad hands, bad anatomy, watermark');
+ const weighted='(shig fuzichoco:1.2), highres';
+ assert.equal(insertTag(weighted,tagContext(weighted,5),'shigure_(kancolle)').value,'(shigure \\(kancolle\\), fuzichoco:1.2), highres');
+});
+
+test('tag completion consumes matching continuations without duplicating an existing tag suffix',()=>{
+ for(const text of ['blu_hair, smile','blue hair, smile']){
+  const result=insertTag(text,tagContext(text,3),'blue_hair');
+  assert.equal(result.value,'blue hair, smile');
+ }
+ const spaced='long hair, smile';
+ assert.equal(insertTag(spaced,tagContext(spaced,4),'long_hair').value,'long hair, smile');
+ const sameTag='fuzfuzichoco, highres';
+ assert.equal(insertTag(sameTag,tagContext(sameTag,3),'fuzichoco').value,'fuzichoco, fuzichoco, highres');
 });
 
 test('tag completion keeps attention weights and escapes tag-name parentheses',()=>{
@@ -58,10 +105,28 @@ test('unavailable lookup retains the original ID',async()=>{
  manager.record={payload:{id:'unchanged',prompt:'A'},state:'unconfirmed'};
  await assert.rejects(manager.reconcile(),/確認できません/);assert.equal(manager.record.payload.id,'unchanged');
 });
-test('404 reconciliation reuses frozen ID and payload',async()=>{
+test('404 reconciliation archives the frozen request and unlocks without sending it',async()=>{
  let posted;const manager=new Registration('lookup404',async(path,body)=>{if(body){posted=body;return {id:body.id};}let e=new Error('missing');e.status=404;throw e;});
  manager.record={id:'lookup404',revision:1,payload:{id:'fixed',prompt:'unchanged'},state:'unconfirmed'};
- await manager.reconcile();assert.equal(posted.id,'fixed');assert.equal(posted.prompt,'unchanged');
+ assert.equal(await manager.reconcile(),null);assert.equal(posted,undefined);assert.equal(manager.record.state,'not_found');
+ const archive=(await listRecords('archives')).find(r=>r.registration?.id==='lookup404');
+ assert.equal(archive.registration.payload.id,'fixed');assert.equal(archive.payload.prompt,'unchanged');
+ await manager.begin({prompt:'new input'});assert.notEqual(posted.id,'fixed');assert.equal(posted.prompt,'new input');
+});
+
+test('a saved failed job acknowledges the registration without any network request',async()=>{
+ const manager=new Registration('known-failure',async()=>{throw new Error('must not request or POST');});
+ manager.record={id:'known-failure',revision:1,state:'unconfirmed',payload:{id:'failed-job',prompt:'original'}};
+ assert.equal(await manager.confirmExisting({id:'unrelated',status:'failed'}),null);
+ const job={id:'failed-job',status:'failed'};assert.equal(await manager.confirmExisting(job),job);
+ assert.equal(manager.record.state,'accepted');assert.equal(manager.record.payload.prompt,'original');
+ assert.equal((await readRecord('registrations','known-failure')).jobId,'failed-job');
+});
+
+test('a failed archive write leaves the registration locked and never transmits',async()=>{
+ const manager=new Registration('archive-full',async(path,body)=>{assert.equal(body,undefined);const e=new Error('missing');e.status=404;throw e;},async()=>false);
+ manager.record={id:'archive-full',revision:1,state:'unconfirmed',payload:{id:'protected',prompt:'original'}};
+ await assert.rejects(manager.reconcile(),/保管/);assert.equal(manager.record.state,'unconfirmed');assert.equal(manager.record.payload.id,'protected');
 });
 test('generation guard rejects out-of-order saves',async()=>{
  await writeRecord('drafts',{id:'ordered',revision:5,schema:1,payload:{prompt:'new'}});
@@ -111,13 +176,14 @@ test('transient draft asset failure must not return null assets',async()=>{
  await assert.rejects(resolveDraftAssets(saved,async()=>{const e=new Error('temporary');e.status=503;throw e;}));
  assert.equal(saved.targetId,'existing');assert.equal(saved.resultId,'existing-result');
 });
-test('registration recovery sends once after durable storage recovers',async()=>{
+test('missing registration is cleared without POST after storage recovers',async()=>{
  let full=true;let posts=0;let sent;
  const save=async()=>{if(full)throw new Error('full');return true;};
  const manager=new Registration('restore-storage',async(path,body)=>{if(body){posts++;sent=structuredClone(body);return {id:body.id};}const e=new Error('missing');e.status=404;throw e;},save);
  await assert.rejects(manager.begin({prompt:'fixed'}));const id=manager.record.payload.id;
  await assert.rejects(manager.reconcile());assert.equal(posts,0);
- full=false;await manager.reconcile();assert.equal(posts,1);assert.equal(sent.id,id);assert.equal(sent.prompt,'fixed');
+ full=false;await manager.reconcile();assert.equal(posts,0);assert.equal(manager.record.state,'not_found');
+ await manager.begin({prompt:'fixed'});assert.equal(posts,1);assert.notEqual(sent.id,id);assert.equal(sent.prompt,'fixed');
 });
 test('stale persistence refusal is not considered a successful save',async()=>{
  let posts=0;const manager=new Registration('stale',async()=>posts++,async()=>false);
@@ -307,12 +373,23 @@ test('SDXL defaults and Hires geometry survive draft restoration',async()=>{
  const {selectLocalModel,localDefaults,localOutputSize}=await import('../src/localModels.js');
  const selected=selectLocalModel({...qwenDefaults,...localDefaults,provider:'comfyui',quality:'medium',model:'Anima',mode:'generate',width:512,height:512},'SDXL');
  assert.equal(selected.clip_skip,2);assert.equal(selected.denoise,.7);assert.equal(selected.qwen_cfg,7);assert.equal(qwenProblem(selected),'');
+ assert.equal(selected.scheduler,'automatic');
  const p={...selected,hires_fix:true,hires_scale:1.5,hires_steps:10,hires_upscaler:'model:4x-UltraSharp.pth',inpaint_area:'masked',inpaint_padding:64,sampler:'euler',scheduler:'normal'};
  const restored=recoverDraft({p,refs:[],strokes:[],redo:[]},selected).payload.p;
  assert.deepEqual(restored,p);assert.deepEqual(localOutputSize(restored),[768,768]);
  assert.deepEqual(localOutputSize({...restored,mode:'inpaint'},{width:641,height:479}),[641,479]);
  assert.equal(qwenProblem({...restored,mode:'inpaint'},{width:641,height:479}),'');
  assert.ok(qwenProblem({...restored,qwen_cfg:31}));assert.ok(qwenProblem({...restored,width:2048,hires_scale:4}));
+});
+
+test('SDXL Automatic follows Neo defaults while manual schedules survive restore',async()=>{
+ const {resolveSdxlScheduler}=await import('../src/sdxlScheduler.js');
+ for(const [sampler,scheduler] of Object.entries({dpmpp_2m:'karras',dpmpp_sde_gpu:'karras',dpmpp_2m_sde:'exponential',dpmpp_3m_sde:'exponential',dpm_2:'karras',euler:'normal',euler_ancestral:'normal',uni_pc:'normal',ddim:'ddim_uniform'}))assert.equal(resolveSdxlScheduler(sampler),scheduler);
+ assert.equal(resolveSdxlScheduler('euler','karras'),'karras');
+ const {selectLocalModel,localDefaults}=await import('../src/localModels.js');
+ const defaults=selectLocalModel({...qwenDefaults,...localDefaults,mode:'generate'},'SDXL');
+ assert.equal(recoverDraft({p:{...defaults,scheduler:'automatic'}},defaults).payload.p.scheduler,'automatic');
+ assert.equal(recoverDraft({p:{...defaults,scheduler:'exponential'}},defaults).payload.p.scheduler,'exponential');
 });
 
 test('SDXL edit modes ignore restored Hires flags and oversized second-pass settings',async()=>{

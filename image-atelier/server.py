@@ -29,6 +29,19 @@ import tag_completion
 import strata_client
 import gpu_status
 
+def enable_fault_diagnostics(folder):
+    """Keep native failure stacks in a local log, without recording prompt values."""
+    import faulthandler
+    try:
+        folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+        log=(folder/'native-crash.log').open('a',encoding='utf-8')
+        log.write('\n=== '+now()+' PID '+str(os.getpid())+' ===\n');log.flush()
+        faulthandler.enable(file=log,all_threads=True)
+        return log
+    except OSError:
+        faulthandler.enable(all_threads=True)
+        return None
+
 def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_runner=None, qwen_runner=None, pe_runner=None):
     store=Store(data_path or ROOT/'data')
     if qwen_runner is not None:store.qwen_runner=Path(qwen_runner)
@@ -138,7 +151,7 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     def bootstrap():
         try:key_set=bool(api_key()) if mock_gate is None else False;config_error=None
         except ValueError:key_set=False;config_error='APIキー設定ファイルを読み込めません。ローカル設定を確認してください。'
-        return {'token':token,'capabilities':CAP,'settings':store.settings(),'key_set':key_set,'config_error':config_error,'roles':ROLES,'test_mode':mock_gate is not None}
+        return {'token':token,'capabilities':CAP,'settings':store.settings(),'key_set':key_set,'config_error':config_error,'roles':ROLES,'test_mode':mock_gate is not None,'sketch_available':True}
 
     @app.get('/api/tag-completions')
     def tag_completions(q:str='',limit:int=12):
@@ -333,6 +346,12 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
         if file is None:raise ValueError('回収用の応答記録がありません。')
         return FileResponse(file,media_type='application/octet-stream',filename='response_'+ident+'.json')
 
+    @app.get('/api/jobs/{ident}/error-response')
+    def error_response(ident:str):
+        file=store.error_response_file(ident)
+        if file is None:raise HTTPException(404,'保存済みのHTTPエラー応答がありません。')
+        return FileResponse(file,media_type='application/octet-stream',filename='http_error_'+ident+'.bin')
+
     @app.post('/api/jobs/{ident}/reprocess')
     def reprocess(ident:str):
         safe_id(ident)
@@ -414,5 +433,6 @@ def create_app(data_path=None, run_worker=True, mock_gate=None, port=18791, gpu_
     return app
 
 if __name__=='__main__':
+    native_crash_log=enable_fault_diagnostics(ROOT/'data')
     import uvicorn
     uvicorn.run(create_app(),host='127.0.0.1',port=18791,access_log=False)

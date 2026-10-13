@@ -1,0 +1,14 @@
+{
+  "dpmpp_2m": "karras",
+  "dpmpp_sde": "karras",
+  "dpmpp_sde_gpu": "karras",
+  "dpmpp_2m_sde": "exponential",
+  "dpmpp_2m_sde_gpu": "exponential",
+  "dpmpp_2m_sde_heun": "exponential",
+  "dpmpp_2m_sde_heun_gpu": "exponential",
+  "dpmpp_3m_sde": "exponential",
+  "dpmpp_3m_sde_gpu": "exponential",
+  "dpm_2": "karras",
+  "restart": "karras",
+  "ddim": "ddim_uniform"
+}

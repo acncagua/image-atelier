@@ -4,9 +4,15 @@ import math
 from pathlib import Path
 from PIL import Image
 from imaging import normalize, mask_image, composite, png
+import sketch
 
 DEFAULTS=json.loads(Path(__file__).with_name('sdxl_defaults.json').read_text('utf-8'))
+SCHEDULER_DEFAULTS=json.loads(Path(__file__).with_name('sdxl_scheduler_defaults.json').read_text('utf-8'))
 REQUIRED=('CheckpointLoaderSimple','CLIPSetLastLayer','CLIPTextEncodeSDXL','EmptyLatentImage','KSampler','VAEDecode','SaveImage')
+
+def resolved_scheduler(p):
+    scheduler=p.get('scheduler',DEFAULTS['scheduler'])
+    return SCHEDULER_DEFAULTS.get(p['sampler'],'normal') if scheduler=='automatic' else scheduler
 
 def hires_enabled(p):return p.get('mode')=='generate' and p.get('hires_fix',False)
 
@@ -23,6 +29,7 @@ def output_size(p):
     return sampling_size(p)
 
 def validate(p):
+    sketch.validate(p)
     for key in ('sampler','scheduler',*(['hires_upscaler'] if p['mode']=='generate' else [])):
         if not isinstance(p[key],str) or not p[key] or len(p[key])>1024:raise ValueError('SDXL設定が不正です: '+key)
     if type(p['hires_fix']) is not bool:raise ValueError('HiresFixはON/OFFで指定してください。')
@@ -43,7 +50,7 @@ def inspect(info):
     if 'ImageUpscaleWithModel' in info:upscalers+=['model:'+n for n in choices('UpscaleModelLoader','model_name')]
     return {'nodes':list(info),'missing':[n for n in REQUIRED if n not in info],
             'checkpoint':choices('CheckpointLoaderSimple','ckpt_name'),'vae':choices('VAELoader','vae_name'),
-            'samplers':choices('KSampler','sampler_name'),'schedulers':choices('KSampler','scheduler'),
+            'samplers':choices('KSampler','sampler_name'),'schedulers':list(dict.fromkeys(['automatic',*choices('KSampler','scheduler')])),
             'upscalers':upscalers}
 
 def validate_models(available,config,p=None):
@@ -52,7 +59,7 @@ def validate_models(available,config,p=None):
     if config.get('vae') and config['vae'] not in available['vae']:raise ValueError('選択したVAEがComfyUIにありません。')
     if p:
         if p['sampler'] not in available['samplers']:raise ValueError('選択サンプラーがComfyUIにありません。')
-        if p['scheduler'] not in available['schedulers']:raise ValueError('選択スケジューラーがComfyUIにありません。')
+        if resolved_scheduler(p) not in available['schedulers']:raise ValueError('適用スケジューラーがComfyUIにありません: '+resolved_scheduler(p))
         if hires_enabled(p):
             if p['hires_upscaler'] not in available['upscalers']:raise ValueError('選択HiresアップスケーラーがComfyUIにありません。')
             if config.get('hires_checkpoint') and config['hires_checkpoint'] not in available['checkpoint']:raise ValueError('HiresチェックポイントがComfyUIにありません。')
@@ -61,7 +68,7 @@ def validate_models(available,config,p=None):
         if missing:raise ValueError('この操作に必要なノードがありません: '+', '.join(missing))
 
 def workflow(p,config,seed,images,ident):
-    graph={}
+    graph={};scheduler=resolved_scheduler(p)
     def add(key,kind,**inputs):graph[str(key)]={'class_type':kind,'inputs':inputs};return [str(key),0]
     add(1,'CheckpointLoaderSimple',ckpt_name=config['checkpoint'])
     clip=add(2,'CLIPSetLastLayer',clip=['1',1],stop_at_clip_layer=-p['clip_skip'])
@@ -82,7 +89,7 @@ def workflow(p,config,seed,images,ident):
             mask=add(23,'ImageToMask',image=mask_image_link,channel='red')
             latent=add(24,'SetLatentNoiseMask',samples=latent,mask=mask)
     samples=add(6,'KSampler',model=['1',0],positive=positive,negative=negative,latent_image=latent,
-                seed=seed,steps=p['qwen_steps'],cfg=p['qwen_cfg'],sampler_name=p['sampler'],scheduler=p['scheduler'],denoise=1.0 if p['mode']=='generate' else p['denoise'])
+                seed=seed,steps=p['qwen_steps'],cfg=p['qwen_cfg'],sampler_name=p['sampler'],scheduler=scheduler,denoise=1.0 if p['mode']=='generate' else p['denoise'])
     pixels=add(7,'VAEDecode',samples=samples,vae=vae)
     if hires_enabled(p):
         final_size=sampling_size(p)
@@ -108,7 +115,7 @@ def workflow(p,config,seed,images,ident):
             hires_mask=add(37,'ImageToMask',image=hires_mask_pixels,channel='red')
             hires_latent=add(38,'SetLatentNoiseMask',samples=hires_latent,mask=hires_mask)
         hp=encode(39,hires_clip,p['prompt'],final_size);hn=encode(40,hires_clip,p.get('qwen_negative',''),final_size)
-        samples=add(41,'KSampler',model=hires_model,positive=hp,negative=hn,latent_image=hires_latent,seed=seed,steps=p['hires_steps'] or p['qwen_steps'],cfg=p['qwen_cfg'],sampler_name=p['sampler'],scheduler=p['scheduler'],denoise=p['denoise'])
+        samples=add(41,'KSampler',model=hires_model,positive=hp,negative=hn,latent_image=hires_latent,seed=seed,steps=p['hires_steps'] or p['qwen_steps'],cfg=p['qwen_cfg'],sampler_name=p['sampler'],scheduler=scheduler,denoise=p['denoise'])
         pixels=add(42,'VAEDecode',samples=samples,vae=hires_vae)
     add(8,'SaveImage',images=pixels,filename_prefix='atelier/'+ident)
     return graph
@@ -129,6 +136,7 @@ def region(p,size):
 def prepare_inputs(store,p):
     if p['mode']=='generate':return []
     original=normalize(store.file(p['target']).read_bytes())
+    original=sketch.render(original,p)
     mask=mask_image(original.size,p['strokes']) if p['mode']=='inpaint' else None
     if only_masked(p):
         box=region(p,original.size);original=original.crop(box);mask=mask.crop(box)
